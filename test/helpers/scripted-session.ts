@@ -20,9 +20,9 @@ export function toolResults(context: { messages: readonly unknown[] }): string[]
  * A Nano conversation as the stdin channel runs it, with a scripted model instead of a real one.
  * Replies the agent sends are collected in `sent`; `next()` resolves with the next one.
  */
-export async function scriptedConversation(options: { packs: string; env?: Record<string, string>; dataDir?: string }) {
+export async function scriptedConversation(options: { packs: string; env?: Record<string, string>; dataDir?: string; tokensPerSecond?: number }) {
 	const dataDir = options.dataDir ?? mkdtempSync(join(tmpdir(), "nano-test-"));
-	const faux = fauxProvider({ provider: "faux", models: [{ id: "scripted" }] });
+	const faux = fauxProvider({ provider: "faux", models: [{ id: "scripted" }], tokensPerSecond: options.tokensPerSecond });
 	const config: Config = loadConfig({
 		NANO_CHANNEL: "stdin",
 		NANO_DATA_DIR: dataDir,

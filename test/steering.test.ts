@@ -1,62 +1,223 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { fauxAssistantMessage, fauxText, fauxToolCall } from "@earendil-works/pi-ai";
-import { scriptedConversation } from "./helpers/scripted-session.ts";
+import { scriptedConversation, toolResults } from "./helpers/scripted-session.ts";
 
-const BURST_WAIT_MS = 1500;
+/** Longer than the 1.2 s burst window, so each say() is its own message. */
+const APART_MS = 1500;
 const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
-/** The owner's text in every user message of a model request. */
-const userTexts = (context: { messages: readonly unknown[] }): string[] =>
+/** Text of the user messages a model request was given, oldest first. */
+const userTexts = (context: { messages: readonly unknown[] }): string =>
 	context.messages
 		.filter((m) => (m as { role?: string }).role === "user")
-		.map((m) => JSON.stringify((m as { content: unknown }).content));
+		.map((m) => JSON.stringify((m as { content: unknown }).content))
+		.join("\n");
 
-async function midTurn(env?: Record<string, string>) {
-	const nano = await scriptedConversation({ packs: "core", env });
-	const requests: string[][] = [];
+/** A model call that does not answer until the test releases it, like a reply still being written. */
+function heldCall() {
 	let release = () => {};
-	const gate = new Promise<void>((resolve) => (release = resolve));
+	const held = new Promise<void>((resolve) => (release = resolve));
+	return { held, release };
+}
+
+async function noMoreReplies(nano: { next: (ms?: number) => Promise<string> }) {
+	await assert.rejects(nano.next(1500), /no reply/);
+}
+
+test("by default a text sent while the reply is being written cancels it, and one reply answers both", async () => {
+	const nano = await scriptedConversation({ packs: "core" });
+	const { held, release } = heldCall();
+	const seen: string[] = [];
 	nano.script([
-		// The model is still working on the first message when the second one arrives.
 		async (context) => {
-			requests.push(userTexts(context));
-			await gate;
+			seen.push(userTexts(context));
+			await held;
+			return fauxAssistantMessage(fauxText("Booked for 7."));
+		},
+		(context) => {
+			seen.push(userTexts(context));
+			return fauxAssistantMessage(fauxText("Booked for 8, and the window seat."));
+		},
+	]);
+	nano.say("book the table for 7");
+	await wait(APART_MS);
+	nano.say("actually 8, and ask for the window");
+	await wait(APART_MS);
+	release();
+	assert.equal(await nano.next(), "Booked for 8, and the window seat.");
+	await noMoreReplies(nano);
+	assert.equal(seen.length, 2);
+	assert.match(seen[1] ?? "", /book the table for 7[\s\S]*actually 8/, "the restart sees both texts, in order");
+	assert.equal(nano.pending(), 0);
+	await nano.conversation.dispose();
+});
+
+test("several texts while the reply is being written all land in the one restarted reply", async () => {
+	const nano = await scriptedConversation({ packs: "core" });
+	const { held, release } = heldCall();
+	const seen: string[] = [];
+	nano.script([
+		async () => {
+			await held;
+			return fauxAssistantMessage(fauxText("never sent"));
+		},
+		(context) => {
+			seen.push(userTexts(context));
+			return fauxAssistantMessage(fauxText("All three."));
+		},
+	]);
+	nano.say("one");
+	await wait(APART_MS);
+	nano.say("two");
+	await wait(APART_MS);
+	nano.say("three");
+	await wait(APART_MS);
+	release();
+	assert.equal(await nano.next(), "All three.");
+	await noMoreReplies(nano);
+	assert.equal(seen.length, 1);
+	assert.match(seen[0] ?? "", /one[\s\S]*two[\s\S]*three/);
+	await nano.conversation.dispose();
+});
+
+test("a text sent while a tool runs does not stop the tool; the next model call sees both", async () => {
+	const nano = await scriptedConversation({ packs: "core" });
+	const seen: { users: string; tools: string[] }[] = [];
+	nano.script([
+		() => fauxAssistantMessage(fauxToolCall("bash", { command: "sleep 3; echo tool-finished" })),
+		(context) => {
+			seen.push({ users: userTexts(context), tools: toolResults(context) });
+			return fauxAssistantMessage(fauxText("Done, at 8."));
+		},
+	]);
+	nano.say("book the table for 7");
+	await wait(APART_MS);
+	nano.say("actually make it 8");
+	assert.equal(await nano.next(), "Done, at 8.");
+	await noMoreReplies(nano);
+	assert.equal(seen.length, 1);
+	assert.match(seen[0]?.tools.join(" ") ?? "", /tool-finished/, "the tool ran to the end");
+	assert.match(seen[0]?.users ?? "", /actually make it 8/);
+	await nano.conversation.dispose();
+});
+
+test("a scheduled job is never cancelled by an owner text; the text is answered after it", async () => {
+	const nano = await scriptedConversation({ packs: "core" });
+	const { held, release } = heldCall();
+	const seen: string[] = [];
+	nano.script([
+		async () => {
+			await held;
+			return fauxAssistantMessage(fauxText("Reminder: water the plants."));
+		},
+		(context) => {
+			seen.push(userTexts(context));
+			return fauxAssistantMessage(fauxText("Hi."));
+		},
+	]);
+	const job = nano.conversation.inject("remind the owner to water the plants");
+	await wait(300);
+	nano.say("hey");
+	await wait(APART_MS);
+	release();
+	assert.equal(await nano.next(), "Reminder: water the plants.");
+	assert.equal(await nano.next(), "Hi.");
+	await job;
+	assert.match(seen[0] ?? "", /hey/);
+	await nano.conversation.dispose();
+});
+
+test("NANO_INBOUND=steer: the text waits for the reply being written, then gets its own reply", async () => {
+	const nano = await scriptedConversation({ packs: "core", env: { NANO_INBOUND: "steer" } });
+	const { held, release } = heldCall();
+	const seen: string[] = [];
+	nano.script([
+		async () => {
+			await held;
+			return fauxAssistantMessage(fauxText("Booked for 7."));
+		},
+		(context) => {
+			seen.push(userTexts(context));
+			return fauxAssistantMessage(fauxText("Changed to 8."));
+		},
+	]);
+	nano.say("book the table for 7");
+	await wait(APART_MS);
+	nano.say("actually make it 8");
+	await wait(APART_MS);
+	release();
+	assert.equal(await nano.next(), "Booked for 7.");
+	assert.equal(await nano.next(), "Changed to 8.");
+	assert.match(seen[0] ?? "", /actually make it 8/);
+	await nano.conversation.dispose();
+});
+
+test("NANO_INBOUND=queue: a text sent mid-turn waits and gets a turn of its own", async () => {
+	const nano = await scriptedConversation({ packs: "core", env: { NANO_INBOUND: "queue" } });
+	const { held, release } = heldCall();
+	const seen: string[] = [];
+	nano.script([
+		async (context) => {
+			seen.push(userTexts(context));
+			await held;
 			return fauxAssistantMessage(fauxToolCall("bash", { command: "true" }));
 		},
 		(context) => {
-			requests.push(userTexts(context));
+			seen.push(userTexts(context));
 			return fauxAssistantMessage(fauxText("Done."));
 		},
 		(context) => {
-			requests.push(userTexts(context));
+			seen.push(userTexts(context));
 			return fauxAssistantMessage(fauxText("Second turn."));
 		},
 	]);
 	nano.say("book the table for 7");
-	await wait(BURST_WAIT_MS);
+	await wait(APART_MS);
 	nano.say("actually make it 8");
-	await wait(BURST_WAIT_MS);
+	await wait(APART_MS);
 	release();
-	return { nano, requests };
-}
-
-test("by default a message sent mid-turn steers the running turn instead of starting a second one", async () => {
-	const { nano, requests } = await midTurn();
 	assert.equal(await nano.next(), "Done.");
-	await wait(300);
-	assert.equal(requests.length, 2, "one turn: two model calls, no extra turn");
-	assert.match(requests[1]?.join(" ") ?? "", /actually make it 8/, "the running turn saw the follow-up before its next model call");
-	assert.equal(nano.pending(), 1, "the second turn's reply was never needed");
+	assert.equal(await nano.next(), "Second turn.");
+	assert.doesNotMatch(seen[1] ?? "", /actually make it 8/, "the first turn never saw the follow-up");
+	assert.match(seen[2] ?? "", /actually make it 8/);
 	await nano.conversation.dispose();
 });
 
-test("NANO_INBOUND=queue keeps the old behaviour: the follow-up waits and gets a turn of its own", async () => {
-	const { nano, requests } = await midTurn({ NANO_INBOUND: "queue" });
-	assert.equal(await nano.next(), "Done.");
-	assert.equal(await nano.next(), "Second turn.");
-	assert.equal(requests.length, 3, "two turns");
-	assert.doesNotMatch(requests[1]?.join(" ") ?? "", /actually make it 8/, "the first turn never saw the follow-up");
-	assert.match(requests[2]?.join(" ") ?? "", /actually make it 8/);
+test("NANO_INBOUND rejects unknown values", async () => {
+	await assert.rejects(scriptedConversation({ packs: "core", env: { NANO_INBOUND: "steering" } }), /NANO_INBOUND must be/);
+});
+
+test("a reply cancelled while it streams is never sent, not even the part already written", async () => {
+	const nano = await scriptedConversation({ packs: "core", tokensPerSecond: 20 });
+	const long = `Booked for 7. ${"Here is everything about the restaurant. ".repeat(40)}`;
+	nano.script([() => fauxAssistantMessage(fauxText(long)), () => fauxAssistantMessage(fauxText("8 it is."))]);
+	nano.say("book the table for 7");
+	await wait(APART_MS);
+	nano.say("actually make it 8");
+	assert.equal(await nano.next(), "8 it is.");
+	await noMoreReplies(nano);
+	await nano.conversation.dispose();
+});
+
+test("a text that arrives while the turn is still setting up its session joins the same prompt", async () => {
+	const nano = await scriptedConversation({ packs: "core" });
+	const seen: string[] = [];
+	nano.script([
+		(context) => {
+			seen.push(userTexts(context));
+			return fauxAssistantMessage(fauxText("Both noted."));
+		},
+	]);
+	// Skip the burst window so the second text lands while the first turn is creating its session.
+	const inner = nano.conversation as unknown as { pending: unknown[]; flushOwner: () => void };
+	for (const text of ["good morning", "also, what's on today?"]) {
+		inner.pending.push({ spaceId: "stdin", senderId: "stdin", messageId: text, text, files: [] });
+		inner.flushOwner();
+	}
+	assert.equal(await nano.next(), "Both noted.");
+	await noMoreReplies(nano);
+	assert.equal(seen.length, 1);
+	assert.match(seen[0] ?? "", /good morning[\s\S]*what's on today/);
 	await nano.conversation.dispose();
 });

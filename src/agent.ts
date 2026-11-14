@@ -77,6 +77,8 @@ export class TurnQueue<T extends { from: string }> {
 	private readonly items: { item: T; done: () => void }[] = [];
 	private readonly run: (batch: T[]) => Promise<void>;
 	private running = false;
+	/** Items taken into the running turn by takeNext; they finish with it. */
+	private joined: (() => void)[] = [];
 
 	constructor(run: (batch: T[]) => Promise<void>) {
 		this.run = run;
@@ -94,6 +96,30 @@ export class TurnQueue<T extends { from: string }> {
 		});
 	}
 
+	/**
+	 * Like push, but the item runs next: ahead of anything queued from another source, behind
+	 * items already queued from its own (so several of them keep their order and merge).
+	 */
+	pushNext(item: T): Promise<void> {
+		return new Promise((done) => {
+			let at = 0;
+			while (this.items[at]?.item.from === item.from) at++;
+			this.items.splice(at, 0, { item, done });
+			void this.drain();
+		});
+	}
+
+	/** Hand the running turn any items from `from` that are next in line; they finish with it. */
+	takeNext(from: T["from"]): T[] {
+		const taken: T[] = [];
+		while (this.items[0]?.item.from === from) {
+			const next = this.items.shift() as { item: T; done: () => void };
+			taken.push(next.item);
+			this.joined.push(next.done);
+		}
+		return taken;
+	}
+
 	private async drain(): Promise<void> {
 		if (this.running || this.items.length === 0) return;
 		const batch = [this.items.shift() as { item: T; done: () => void }];
@@ -106,6 +132,7 @@ export class TurnQueue<T extends { from: string }> {
 		} finally {
 			this.running = false;
 			for (const b of batch) b.done();
+			for (const done of this.joined.splice(0)) done();
 			void this.drain();
 		}
 	}
@@ -135,6 +162,17 @@ export class Conversation {
 	 * moves lastActivity to now, so the gap has to be noticed before that, not in ensureSession.
 	 */
 	private rolloverAt?: number;
+	/** Who the running turn is for; only an owner's turn is interrupted by the owner. */
+	private turnFrom?: Work["from"];
+	/**
+	 * What the running turn is doing: "model" while a model call may be writing a reply that has
+	 * not been sent, "tools" while tool calls run, "done" once the reply has gone out.
+	 */
+	private phase: "model" | "tools" | "done" = "done";
+	/** Set once the running turn has been cancelled for a newer owner message, until it ends. */
+	private interrupted = false;
+	/** Whether the running turn has sent its prompt to the model yet. */
+	private prompted = false;
 
 	constructor(
 		spaceId: string,
@@ -201,16 +239,41 @@ export class Conversation {
 		if (isIdle(this.state.lastActivity, this.config.idleHours)) this.rolloverAt ??= Date.now();
 		this.record("owner", spoken);
 
-		// By default a message that lands mid-run steers the run instead of waiting behind it.
-		// NANO_INBOUND=queue skips this: the message waits and gets a turn of its own.
-		if (this.config.inbound === "steer" && this.queue.busy && this.session?.isStreaming) {
-			void this.session.steer(this.stamp(spoken), images).catch((error) => this.fail(error));
+		const work: Work = { from: "owner", spoken, images };
+		const running = this.queue.busy && this.session?.isStreaming === true;
+		const ownerTurn = this.config.inbound === "interrupt" && this.queue.busy && this.turnFrom === "owner";
+		if (ownerTurn && !this.prompted) {
+			// The turn is still setting up and has not asked the model yet: it takes this message too.
+			void this.queue.pushNext(work);
 			return;
 		}
-		void this.queue.push({ from: "owner", spoken, images });
+		if (ownerTurn && (this.interrupted || this.phase === "model")) {
+			// The model is writing (or about to write) a reply nobody has seen: cancel it and answer
+			// everything at once. A run that has not started yet is cancelled as soon as it does.
+			void this.queue.pushNext(work);
+			if (!this.interrupted) {
+				this.interrupted = true;
+				if (running) this.abortRun();
+			}
+			return;
+		}
+		if (running && this.config.inbound !== "queue") {
+			// Tools are running (or the reply is out): the message joins the run at its next model call.
+			void this.session?.steer(this.stamp(spoken), images).catch((error) => this.fail(error));
+			return;
+		}
+		void this.queue.push(work);
+	}
+
+	private abortRun(): void {
+		void this.session?.abort().catch((error) => console.error("nano: abort failed:", error));
 	}
 
 	private async turn(batch: Work[]): Promise<void> {
+		this.turnFrom = batch[0]?.from;
+		this.phase = "model";
+		this.interrupted = false;
+		this.prompted = false;
 		const typing = setInterval(() => void this.channel.typing(this.spaceId, true), TYPING_REFRESH_MS);
 		void this.channel.typing(this.spaceId, true);
 		try {
@@ -218,12 +281,19 @@ export class Conversation {
 			const intro = carry
 				? `[New context window after a gap. The last messages before it, for continuity only:\n${carry}]\n\n`
 				: "";
+			// Owner messages that arrived while the session was being set up join this prompt.
+			if (batch[0]?.from === "owner") batch = [...batch, ...this.queue.takeNext("owner")];
+			this.prompted = true;
 			const images = batch.flatMap((w) => (w.from === "owner" ? w.images : []));
 			const body = batch.map((w) => (w.from === "owner" ? this.stamp(w.spoken) : this.stamp(w.text, w.note))).join("\n\n");
 			await session.prompt(intro + body, images.length > 0 ? { images } : undefined);
 		} catch (error) {
-			await this.fail(error);
+			if (!this.interrupted) await this.fail(error);
 		} finally {
+			this.turnFrom = undefined;
+			this.phase = "done";
+			this.interrupted = false;
+			this.prompted = false;
 			clearInterval(typing);
 			void this.channel.typing(this.spaceId, false);
 			this.state.sessionFile = this.session?.sessionFile ?? this.state.sessionFile;
@@ -270,8 +340,16 @@ export class Conversation {
 			resume,
 		});
 
+		// Several messages waiting at one step all join it, rather than one per model call.
+		session.setSteeringMode("all");
 		this.unsubscribe = session.subscribe((event) => {
-			if (event.type !== "message_end") return;
+			if (event.type === "agent_start" && this.interrupted) this.abortRun();
+			if (event.type === "agent_start" || event.type === "turn_start") this.phase = "model";
+			if (event.type === "agent_end") this.phase = "done";
+			if (event.type !== "message_end" || event.message.role !== "assistant") return;
+			// A cancelled reply is never sent, not even the part already written.
+			if (event.message.stopReason === "aborted") return;
+			this.phase = event.message.content.some((c) => c.type === "toolCall") ? "tools" : "done";
 			const { text, error } = assistantText(event.message);
 			if (text) void this.say(text);
 			else if (error) void this.say(`I hit an error talking to the model: ${error.slice(0, 200)}`);

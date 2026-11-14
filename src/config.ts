@@ -15,8 +15,12 @@ export interface Config {
 	thinking: "off" | "minimal" | "low" | "medium" | "high";
 	/** Hours of silence after which the next message starts a fresh context window. */
 	idleHours: number;
-	/** What an owner message does when a turn is already running: steer that turn, or wait for its own. */
-	inbound: "steer" | "queue";
+	/**
+	 * What an owner message does when a turn is already running: "interrupt" cancels a reply still
+	 * being written and answers both, otherwise steers; "steer" only joins at the next model call;
+	 * "queue" waits for a turn of its own.
+	 */
+	inbound: "interrupt" | "steer" | "queue";
 	dataDir: string;
 	kbDir: string;
 	profileDir: string;
@@ -80,7 +84,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
 		modelId: rest.join("/"),
 		thinking,
 		idleHours: Number(env.NANO_IDLE_HOURS ?? 4),
-		inbound: (env.NANO_INBOUND?.trim().toLowerCase() || "steer") as Config["inbound"],
+		inbound: (env.NANO_INBOUND?.trim().toLowerCase() || "interrupt") as Config["inbound"],
 		dataDir,
 		kbDir: resolve(env.NANO_KB_DIR ?? join(dataDir, "kb")),
 		profileDir: resolve(env.NANO_PROFILE_DIR ?? join(dataDir, "profile")),
@@ -98,7 +102,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
 	if (Boolean(env.NANO_LOCAL_MODEL?.trim()) !== Boolean(env.NANO_LOCAL_BASE_URL?.trim())) {
 		problems.push("NANO_LOCAL_MODEL and NANO_LOCAL_BASE_URL must be set together");
 	}
-	if (config.inbound !== "steer" && config.inbound !== "queue") problems.push("NANO_INBOUND must be steer or queue");
+	if (!["interrupt", "steer", "queue"].includes(config.inbound)) problems.push("NANO_INBOUND must be interrupt, steer or queue");
 	if (config.local && !(config.local.contextWindow > 0)) problems.push("NANO_LOCAL_CONTEXT must be a number of tokens");
 	if (channel === "photon") {
 		if (!config.photonProjectId) problems.push("PHOTON_PROJECT_ID is not set");
