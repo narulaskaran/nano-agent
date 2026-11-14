@@ -48,7 +48,7 @@ export async function createNanoSession(options: {
 		thinkingLevel: config.thinking,
 		modelRuntime: options.modelRuntime,
 		resourceLoader: loader,
-		settingsManager: SettingsManager.inMemory({ compaction: { enabled: true } }),
+		settingsManager: SettingsManager.inMemory({ compaction: { enabled: true }, steeringMode: "all" }),
 		sessionManager: options.resume ? SessionManager.open(options.resume) : SessionManager.create(cwd, options.sessionsDir),
 	});
 	await session.bindExtensions({});

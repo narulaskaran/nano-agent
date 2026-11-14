@@ -97,14 +97,14 @@ export class TurnQueue<T extends { from: string }> {
 	}
 
 	/**
-	 * Like push, but the item runs next: ahead of anything queued from another source, behind
-	 * items already queued from its own (so several of them keep their order and merge).
+	 * Like push, but this source runs next: every item already queued from it moves ahead of
+	 * other sources, in its own order, followed by `item`, so they all merge into one turn.
 	 */
 	pushNext(item: T): Promise<void> {
 		return new Promise((done) => {
-			let at = 0;
-			while (this.items[at]?.item.from === item.from) at++;
-			this.items.splice(at, 0, { item, done });
+			const own = this.items.filter((entry) => entry.item.from === item.from);
+			const others = this.items.filter((entry) => entry.item.from !== item.from);
+			this.items.splice(0, this.items.length, ...own, { item, done }, ...others);
 			void this.drain();
 		});
 	}
@@ -147,18 +147,17 @@ interface RunState {
 	/** Who the turn is for; only an owner's turn is interrupted by the owner. */
 	from: Work["from"];
 	/**
-	 * "model" while a model call may be writing a reply nobody has seen, "tools" while tool calls
-	 * run, "done" once the reply has gone out.
+	 * - setup: the session is being prepared; the prompt has not been written yet.
+	 * - starting: the prompt is handed over, the model run has not begun (input hooks, compaction).
+	 * - model: a model call is writing output nobody has seen.
+	 * - tools: the model has asked for tools; they run before its next call.
+	 * - done: the reply has gone out.
 	 */
-	phase: "model" | "tools" | "done";
-	/** Whether the prompt has been handed to the model yet. */
-	prompted: boolean;
-	/** A newer owner message has asked for this turn to be cancelled. */
+	phase: "setup" | "starting" | "model" | "tools" | "done";
+	/** A newer owner message is waiting: cancel at the next point where nothing done is lost. */
 	interrupted: boolean;
-	/** The cancel has actually been sent to the model call. */
+	/** The cancel has been sent. */
 	aborted: boolean;
-	/** Owner messages steered into this turn, oldest first. */
-	steered: Work[];
 }
 
 export class Conversation {
@@ -252,34 +251,25 @@ export class Conversation {
 		const work: Work = { from: "owner", spoken, images };
 		const run = this.run;
 		const streaming = run !== undefined && this.session?.isStreaming === true;
-		const interruptible = this.config.inbound === "interrupt" && run?.from === "owner";
-		if (interruptible && !run.prompted) {
-			// The turn is still setting up and has not asked the model yet: it takes this message too.
+		if (this.config.inbound === "interrupt" && run?.from === "owner") {
+			// During the owner's own turn every new text goes through the queue (never Pi's steering
+			// queue), so one turn answers them all, in order.
 			void this.queue.pushNext(work);
+			// setup: the turn takes it into its prompt. done: the reply is out; it gets the next turn.
+			if (run.phase === "setup" || run.phase === "done" || run.interrupted) return;
+			run.interrupted = true;
+			// A reply still being written is cancelled now. Otherwise the cancel waits for the run to
+			// start or for running tools to finish, and lands before the model writes anything else.
+			if (run.phase === "model") this.abortRun();
 			return;
 		}
-		if (interruptible && (run.interrupted || run.phase === "model")) {
-			// The model is writing (or about to write) a reply nobody has seen: cancel it and answer
-			// everything at once. A run that has not started yet is cancelled as soon as it does.
-			if (!run.interrupted) {
-				run.interrupted = true;
-				// Steered messages the model has not seen yet would otherwise land after this one.
-				const waiting = this.session?.pendingMessageCount ?? 0;
-				const unseen = waiting > 0 ? run.steered.slice(-waiting) : [];
-				if (unseen.length > 0) this.session?.clearQueue();
-				for (const earlier of unseen) void this.queue.pushNext(earlier);
-				if (streaming) this.abortRun();
-			}
-			void this.queue.pushNext(work);
-			return;
-		}
-		if (streaming && this.config.inbound !== "queue") {
-			// Tools are running (or the reply is out): the message joins the run at its next model call.
-			run.steered.push(work);
+		if (streaming && this.config.inbound !== "queue" && run.phase !== "done") {
+			// A scheduled job or task result is never cancelled: the text joins its next model call.
 			void this.session?.steer(this.stamp(spoken), images).catch((error) => this.fail(error));
 			return;
 		}
-		void this.queue.push(work);
+		if (this.config.inbound === "interrupt") void this.queue.pushNext(work);
+		else void this.queue.push(work);
 	}
 
 	private abortRun(): void {
@@ -288,7 +278,7 @@ export class Conversation {
 	}
 
 	private async turn(batch: Work[]): Promise<void> {
-		const run: RunState = { from: batch[0]?.from ?? "system", phase: "model", prompted: false, interrupted: false, aborted: false, steered: [] };
+		const run: RunState = { from: batch[0]?.from ?? "system", phase: "setup", interrupted: false, aborted: false };
 		this.run = run;
 		const typing = setInterval(() => void this.channel.typing(this.spaceId, true), TYPING_REFRESH_MS);
 		void this.channel.typing(this.spaceId, true);
@@ -299,7 +289,7 @@ export class Conversation {
 				: "";
 			// Owner messages that arrived while the session was being set up join this prompt.
 			if (run.from === "owner" && this.config.inbound === "interrupt") batch = [...batch, ...this.queue.takeNext("owner")];
-			run.prompted = true;
+			run.phase = "starting";
 			const images = batch.flatMap((w) => (w.from === "owner" ? w.images : []));
 			const body = batch.map((w) => (w.from === "owner" ? this.stamp(w.spoken) : this.stamp(w.text, w.note))).join("\n\n");
 			await session.prompt(intro + body, images.length > 0 ? { images } : undefined);
@@ -354,12 +344,15 @@ export class Conversation {
 			resume,
 		});
 
-		// Several messages waiting at one step all join it, rather than one per model call.
-		session.setSteeringMode("all");
 		this.unsubscribe = session.subscribe((event) => {
 			const run = this.run;
-			if (run && event.type === "agent_start" && run.interrupted) this.abortRun();
-			if (run && (event.type === "agent_start" || event.type === "turn_start")) run.phase = "model";
+			if (run && (event.type === "agent_start" || event.type === "turn_start")) {
+				run.phase = "model";
+				// A cancel that waited for the run to start or for tools to finish happens here.
+				if (run.interrupted && !run.aborted) this.abortRun();
+			}
+			// Once a tool call is being written it is left to run; a cancel waits for the next model call.
+			if (run && event.type === "message_update" && event.assistantMessageEvent.type === "toolcall_start") run.phase = "tools";
 			if (run && event.type === "agent_end") run.phase = "done";
 			if (event.type !== "message_end" || event.message.role !== "assistant") return;
 			// A cancelled reply is never sent, not even the part already written.

@@ -240,11 +240,13 @@ test("pushNext runs ahead of other sources but keeps its own source's order", as
 	const done = [
 		queue.push({ from: "owner", text: "hi" }),
 		queue.push({ from: "system", text: "reminder" }),
-		queue.pushNext({ from: "owner", text: "second" }),
+		// An owner text already waiting behind the reminder keeps its place ahead of newer ones.
+		queue.push({ from: "owner", text: "second" }),
 		queue.pushNext({ from: "owner", text: "third" }),
+		queue.pushNext({ from: "owner", text: "fourth" }),
 	];
 	await tick();
 	release();
 	await Promise.all(done);
-	assert.deepEqual(turns, [["owner:hi"], ["owner:second", "owner:third"], ["system:reminder"]]);
+	assert.deepEqual(turns, [["owner:hi"], ["owner:second", "owner:third", "owner:fourth"], ["system:reminder"]]);
 });

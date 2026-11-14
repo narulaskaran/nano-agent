@@ -244,36 +244,25 @@ test("NANO_INBOUND=queue: a text that arrives while the session is being set up 
 	await nano.conversation.dispose();
 });
 
-test("a cancel keeps an earlier steered text the model had not seen yet ahead of the newer one", async () => {
-	const nano = await scriptedConversation({ packs: "core" });
-	const { held, release } = heldCall();
-	const seen: string[] = [];
+test("a text sent while the model is still writing a tool call lets that tool run, then one reply covers both", async () => {
+	// Slow streaming, so the second text lands while the tool call itself is being written.
+	const nano = await scriptedConversation({ packs: "core", tokensPerSecond: 15 });
+	const seen: { users: string; tools: string[] }[] = [];
+	const padding = "x".repeat(200);
 	nano.script([
-		async () => {
-			await held;
-			return fauxAssistantMessage(fauxText("never sent"));
-		},
+		() => fauxAssistantMessage(fauxToolCall("bash", { command: `echo tool-ran # ${padding}` })),
 		(context) => {
-			seen.push(userTexts(context));
-			return fauxAssistantMessage(fauxText("Handled both."));
+			seen.push({ users: userTexts(context), tools: toolResults(context) });
+			return fauxAssistantMessage(fauxText("Done, at 8."));
 		},
 	]);
 	nano.say("book the table for 7");
 	await wait(APART_MS);
-	// The rare race: a text steered just as the model call began, so it is still waiting in Pi's queue.
-	const inner = nano.conversation as unknown as {
-		run: { steered: unknown[] };
-		session: { steer: (text: string) => Promise<void> };
-	};
-	inner.run.steered.push({ from: "owner", spoken: "for four people", images: [] });
-	await inner.session.steer("for four people");
 	nano.say("actually make it 8");
-	await wait(APART_MS);
-	release();
-	assert.equal(await nano.next(), "Handled both.");
+	assert.equal(await nano.next(), "Done, at 8.");
 	await noMoreReplies(nano);
 	assert.equal(seen.length, 1);
-	assert.match(seen[0] ?? "", /table for 7[\s\S]*four people[\s\S]*make it 8/);
-	assert.equal(seen[0]?.split("four people").length, 2, "the steered text appears once");
+	assert.match(seen[0]?.tools.join(" ") ?? "", /tool-ran/, "the tool call was not cancelled");
+	assert.match(seen[0]?.users ?? "", /table for 7[\s\S]*make it 8/);
 	await nano.conversation.dispose();
 });
