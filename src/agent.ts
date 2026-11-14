@@ -201,8 +201,9 @@ export class Conversation {
 		if (isIdle(this.state.lastActivity, this.config.idleHours)) this.rolloverAt ??= Date.now();
 		this.record("owner", spoken);
 
-		// A message that lands mid-run steers the run instead of waiting behind it.
-		if (this.queue.busy && this.session?.isStreaming) {
+		// By default a message that lands mid-run steers the run instead of waiting behind it.
+		// NANO_INBOUND=queue skips this: the message waits and gets a turn of its own.
+		if (this.config.inbound === "steer" && this.queue.busy && this.session?.isStreaming) {
 			void this.session.steer(this.stamp(spoken), images).catch((error) => this.fail(error));
 			return;
 		}
