@@ -70,7 +70,7 @@ In Docker, mount the file read-only, for example `-v /path/to/google_token.json:
 
 ## Keepalive
 
-A refresh token that goes unused for about six months stops working. The skill has the agent schedule a weekly `script` job running `google auth check --quiet`. That command always uses the refresh token and makes one cheap call (the Gmail profile, or the calendar list). It prints nothing on success, and one line on failure. It exits 0 either way, because the scheduler only delivers output from commands that succeed.
+A refresh token that goes unused for about six months stops working. The skill has the agent schedule a weekly `script` job running `google auth check --quiet`. That command always uses the refresh token and makes one cheap call (the Gmail profile, or the calendar list). It prints nothing on success, and one line on failure. It exits 0 either way, so the scheduler delivers that line as is. A non-zero exit would count as a broken check and go to a repair attempt first, and an expired Google token needs the owner, not a repair.
 
 ## Scripts and a local model (design note)
 

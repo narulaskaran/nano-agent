@@ -61,7 +61,10 @@ async function main(): Promise<void> {
 				role: work.model ?? "main",
 				private: Boolean(work.private),
 				spaceId,
-				source: "schedule",
+				// A repair that could not fix the job speaks to the owner directly; a scheduled run may answer [silent].
+				source: work.repairOf ? "delegate" : "schedule",
+				jobId: work.jobId,
+				repairOf: work.repairOf,
 			});
 		},
 	});
@@ -71,6 +74,7 @@ async function main(): Promise<void> {
 		timeoutMs: config.taskTimeoutMs,
 		runner: createWorkerRunner({ config, modelRuntime, scheduler }),
 		handBack: (spaceId, prompt) => conversation(spaceId).inject(prompt, HAND_BACK_NOTE),
+		onJobRunEnded: (task) => scheduler.taskEnded(task),
 	});
 	function conversation(spaceId: string): Conversation {
 		let c = conversations.get(spaceId);

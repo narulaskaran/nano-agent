@@ -1,8 +1,9 @@
 import { execFile } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { type Config, currentTimezone } from "./config.ts";
+import { readJsonFile, writeJsonFile } from "./json-store.ts";
 
 /**
  * What a job does when it fires:
@@ -30,20 +31,65 @@ export interface Job {
 	background?: boolean;
 	model?: "main" | "local";
 	private?: boolean;
+	/** How the job's recent runs went. Kept in schedule.json so the failure policy survives restarts. */
+	health?: JobHealth;
+}
+
+/**
+ * One failure streak of a job. Policy (see Scheduler.failed): transient errors wait for the next
+ * run; a real or lasting failure gets one repair attempt by a background worker; if the job still
+ * fails after that, the owner is told once. A success ends the streak.
+ */
+export interface JobHealth {
+	/** Consecutive failed runs. Zero means healthy. */
+	failures: number;
+	/** When the current failure streak started. */
+	since?: number;
+	lastSuccess?: number;
+	lastFailure?: number;
+	lastError?: string;
+	/** A repair worker was started for this streak. */
+	repairAt?: number;
+	/** The owner was told about this streak. */
+	escalated?: boolean;
+}
+
+export interface BackgroundWork {
+	title: string;
+	instructions: string;
+	model?: "main" | "local";
+	private?: boolean;
+	/** The job this run belongs to; its outcome comes back through Scheduler.taskEnded. */
+	jobId?: string;
+	/** A repair attempt for this job id. A successful repair stays silent; anything else reaches the owner. */
+	repairOf?: string;
 }
 
 export interface JobSink {
 	send(spaceId: string, text: string): Promise<void>;
 	task(spaceId: string, prompt: string): Promise<void>;
 	/** Start a background worker; its answer comes back through the task hand-back. */
-	background(spaceId: string, work: { title: string; instructions: string; model?: "main" | "local"; private?: boolean }): Promise<void>;
+	background(spaceId: string, work: BackgroundWork): Promise<void>;
 }
 
 const TICK_MS = 20_000;
 const SCRIPT_TIMEOUT_MS = 120_000;
+/** A reminder whose send keeps failing is retried this long, then reported once and dropped. */
+export const RETRY_MS = 10 * 60_000;
+/** A transient failure stops counting as transient after this many runs in a row, or this long. */
+export const TRANSIENT_RUNS = 3;
+export const TRANSIENT_MS = 60 * 60_000;
+/** After starting a repair, further failures stay quiet this long so the repair can finish. */
+export const REPAIR_GRACE_MS = 30 * 60_000;
 
+/** Errors that usually clear on their own: timeouts, network trouble, overloaded or rate-limited services. */
+export function isTransient(error: string): boolean {
+	return /timed out|timeout|ETIMEDOUT|could not resolve|connection (refused|reset)|ECONNRESET|ECONNREFUSED|ENOTFOUND|EAI_AGAIN|ENETUNREACH|EHOSTUNREACH|socket hang up|network|\b(408|429|500|502|503|504)\b|rate.?limit|too many requests|overloaded|temporarily|unavailable/i.test(error);
+}
+
+// Every part is evaluated (no short-circuit) so a malformed field throws even when an earlier part matches.
 function fieldMatches(field: string, value: number, min: number, max: number): boolean {
-	return field.split(",").some((part) => {
+	return field.split(",").map((part) => {
 		const [range, stepText] = part.split("/");
 		const step = stepText ? Number(stepText) : 1;
 		if (!Number.isInteger(step) || step < 1) throw new Error(`bad cron step: ${part}`);
@@ -58,7 +104,7 @@ function fieldMatches(field: string, value: number, min: number, max: number): b
 			}
 		}
 		return value >= lo && value <= hi && (value - lo) % step === 0;
-	});
+	}).some(Boolean);
 }
 
 /** Wall-clock parts of `at` in `timeZone`. */
@@ -96,9 +142,11 @@ export function cronMatches(expression: string, at: Date, timeZone: string): boo
 	const weekdayOk = fieldMatches(weekday, now.weekday, 0, 7) || (now.weekday === 0 && fieldMatches(weekday, 7, 0, 7));
 	// As in cron: when both day fields are restricted, either one matching is enough.
 	const dateOk = day !== "*" && weekday !== "*" ? dayOk || weekdayOk : dayOk && weekdayOk;
-	return (
-		fieldMatches(minute, now.minute, 0, 59) && fieldMatches(hour, now.hour, 0, 23) && fieldMatches(month, now.month, 1, 12) && dateOk
-	);
+	// Evaluate all five fields before combining, so a bad hour or month is rejected even when the minute does not match now.
+	const minuteOk = fieldMatches(minute, now.minute, 0, 59);
+	const hourOk = fieldMatches(hour, now.hour, 0, 23);
+	const monthOk = fieldMatches(month, now.month, 1, 12);
+	return minuteOk && hourOk && monthOk && dateOk;
 }
 
 /** Parse "2026-11-12T09:00" (owner's wall clock) or any ISO string with an offset into epoch ms. */
@@ -142,6 +190,10 @@ export class Scheduler {
 	private timer?: NodeJS.Timeout;
 	private running = new Set<string>();
 	private outboxRunning = new Set<string>();
+	/** In memory only: when a one-shot reminder's send first failed. */
+	private failedSince = new Map<string, number>();
+	/** In memory only: jobs whose cron expression is unusable, logged once. */
+	private badCron = new Set<string>();
 	private readonly config: Config;
 	private readonly sink: JobSink;
 
@@ -149,11 +201,8 @@ export class Scheduler {
 		this.config = config;
 		this.sink = sink;
 		this.path = join(config.dataDir, "schedule.json");
-		try {
-			if (existsSync(this.path)) this.jobs = JSON.parse(readFileSync(this.path, "utf8")).jobs ?? [];
-		} catch (error) {
-			console.error("nano: could not read schedule.json, starting empty:", error);
-		}
+		const stored = readJsonFile<{ jobs?: Job[] } | null>(this.path, null);
+		if (Array.isArray(stored?.jobs)) this.jobs = stored.jobs;
 	}
 
 	start(): void {
@@ -183,6 +232,8 @@ export class Scheduler {
 		if (index < 0) return undefined;
 		const [job] = this.jobs.splice(index, 1);
 		this.save();
+		this.failedSince.delete(id);
+		this.badCron.delete(id);
 		return job;
 	}
 
@@ -251,34 +302,153 @@ export class Scheduler {
 				const firedThisMinute = job.lastFired !== undefined && Math.floor(job.lastFired / 60_000) === minute;
 				try {
 					due = !firedThisMinute && cronMatches(job.cron, now, tz);
-				} catch {
+				} catch (error) {
 					due = false;
+					if (!this.badCron.has(job.id)) {
+						this.badCron.add(job.id);
+						console.error(`nano: job ${job.id} (${job.name}) has an unusable schedule "${job.cron}" and will never fire: ${(error as Error)?.message ?? error}`);
+					}
 				}
 			}
 			if (!due) continue;
 
-			// Persist before running so a crash mid-run cannot fire the same job twice.
-			job.lastFired = now.getTime();
-			if (job.at !== undefined) this.jobs = this.jobs.filter((j) => j.id !== job.id);
-			this.save();
+			// A one-shot reminder stays scheduled until it is actually sent (see deliverReminder), so it can be retried.
+			// Every other job is persisted before running, so a crash mid-run cannot fire it twice.
+			if (!isReminder(job)) {
+				job.lastFired = now.getTime();
+				if (job.at !== undefined) this.jobs = this.jobs.filter((j) => j.id !== job.id);
+				this.save();
+			}
 			this.running.add(job.id);
-			void this.fire(job).finally(() => this.running.delete(job.id));
+			void this.fire(job, now.getTime()).finally(() => this.running.delete(job.id));
 		}
 	}
 
-	private async fire(job: Job): Promise<void> {
+	/**
+	 * Send a one-shot reminder, then remove it. A failed send leaves it scheduled and the next tick tries
+	 * again. After RETRY_MS of failures it is dropped, and one last attempt tells the owner what was missed.
+	 * Delivery is at least once: a crash between the send and the removal sends it again on restart.
+	 */
+	private async deliverReminder(job: Job, now: number): Promise<void> {
+		try {
+			await this.sink.send(job.spaceId, job.body);
+		} catch (error) {
+			const since = this.failedSince.get(job.id) ?? now;
+			this.failedSince.set(job.id, since);
+			console.error(`nano: reminder ${job.id} (${job.name}) not sent, will retry:`, (error as Error)?.message ?? error);
+			if (now - since < RETRY_MS) return;
+			this.failedSince.delete(job.id);
+			this.removeJob(job.id);
+			console.error(`nano: giving up on reminder ${job.id} (${job.name}): ${job.body}`);
+			await this.sink.send(job.spaceId, `I could not deliver a reminder on time ("${job.name}"): ${job.body}`).catch(() => {});
+			return;
+		}
+		this.failedSince.delete(job.id);
+		this.removeJob(job.id);
+	}
+
+	private removeJob(id: string): void {
+		this.jobs = this.jobs.filter((j) => j.id !== id);
+		this.save();
+	}
+
+	/** A background run of a job ended (TaskManager calls this). Feeds the same failure policy as scripts. */
+	taskEnded(task: { jobId?: string; spaceId: string; title: string; status: string; error?: string }, now = Date.now()): void {
+		if (!task.jobId) return;
+		const job = this.jobs.find((j) => j.id === task.jobId);
+		if (task.status === "done") {
+			if (job) this.succeeded(job, now);
+			return;
+		}
+		if (task.status !== "failed") return;
+		const error = task.error ?? "unknown error";
+		if (job) void this.failed(job, error, now);
+		// A one-shot job is gone by now and never runs again, so there is nothing to wait for or repair.
+		else void this.sink.send(task.spaceId, `The scheduled task "${task.title}" failed: ${error.slice(0, 200)}`).catch(() => {});
+	}
+
+	private succeeded(job: Job, now: number): void {
+		const wasEscalated = job.health?.escalated;
+		job.health = { failures: 0, lastSuccess: now };
+		this.save();
+		if (wasEscalated) void this.sink.send(job.spaceId, `"${job.name}" is working again.`).catch(() => {});
+	}
+
+	/** Record a failed run. A new streak starts with a clean slate: no repair tried, owner not told. */
+	private noteFailure(job: Job, error: string, now: number): JobHealth {
+		const prev = job.health?.failures ? job.health : undefined;
+		const health: JobHealth = {
+			...prev,
+			failures: (prev?.failures ?? 0) + 1,
+			since: prev?.since ?? now,
+			lastSuccess: job.health?.lastSuccess,
+			lastFailure: now,
+			lastError: error.replace(/\s+/g, " ").trim().slice(0, 300),
+		};
+		job.health = health;
+		this.save();
+		console.error(`nano: job ${job.id} (${job.name}) failed (${health.failures} in a row): ${health.lastError}`);
+		return health;
+	}
+
+	/**
+	 * The failure policy. Transient errors wait for the next run, up to TRANSIENT_RUNS runs or
+	 * TRANSIENT_MS. Anything else gets one repair attempt. If the job still fails once the repair
+	 * has had REPAIR_GRACE_MS, the owner is told once, and the job stays quiet until it works again.
+	 */
+	private async failed(job: Job, error: string, now: number): Promise<void> {
+		const health = this.noteFailure(job, error, now);
+		if (health.escalated) return;
+		const lasting = !isTransient(error) || health.failures >= TRANSIENT_RUNS || now - (health.since ?? now) >= TRANSIENT_MS;
+		if (!lasting) return;
+		if (health.repairAt === undefined) {
+			health.repairAt = now;
+			this.save();
+			try {
+				await this.sink.background(job.spaceId, { title: `Repair "${job.name}"`, instructions: repairPrompt(job, this.config.dataDir), model: job.model, private: job.private, repairOf: job.id });
+				console.error(`nano: started a repair for job ${job.id} (${job.name})`);
+				return;
+			} catch (startError) {
+				console.error(`nano: could not start a repair for job ${job.id}:`, (startError as Error)?.message ?? startError);
+				// Fall through and tell the owner now.
+			}
+		} else if (now - health.repairAt < REPAIR_GRACE_MS) {
+			return;
+		}
+		const tried = health.repairAt !== undefined && now - health.repairAt >= REPAIR_GRACE_MS ? " and I could not fix it" : "";
+		try {
+			await this.sink.send(job.spaceId, `"${job.name}" keeps failing${tried}: ${(health.lastError ?? "").slice(0, 200)}. I will stay quiet about it until it works again.`);
+			health.escalated = true;
+			this.save();
+		} catch {
+			// Not delivered: the next failure tries again.
+		}
+	}
+
+	private async fire(job: Job, now: number): Promise<void> {
 		console.error(`nano: firing ${job.kind} job ${job.id} (${job.name})${job.background ? " in the background" : ""}`);
 		const agent = (prompt: string) =>
 			job.background
-				? this.sink.background(job.spaceId, { title: job.name, instructions: prompt, model: job.model, private: job.private })
+				? this.sink.background(job.spaceId, { title: job.name, instructions: prompt, model: job.model, private: job.private, jobId: job.id })
 				: this.sink.task(job.spaceId, prompt);
 		try {
 			if (job.kind === "message") {
+				if (isReminder(job)) return await this.deliverReminder(job, now);
 				await this.sink.send(job.spaceId, job.body);
+				this.succeeded(job, now);
 			} else if (job.kind === "task") {
 				await agent(`Scheduled task "${job.name}":\n${job.body}\nIf there is nothing worth telling the owner, reply exactly [silent].`);
+				// A background run reports its outcome later, through taskEnded. A main-conversation turn reports its own errors.
+				if (!job.background) this.succeeded(job, now);
 			} else {
-				const output = await runScript(job.body, join(this.config.dataDir, "workspace"));
+				let output: string;
+				try {
+					output = await runScript(job.body, join(this.config.dataDir, "workspace"));
+				} catch (error) {
+					await this.failed(job, (error as Error)?.message ?? String(error), now);
+					return;
+				}
+				this.succeeded(job, now);
 				if (!output) return;
 				if (job.then === "task") {
 					await agent(`Scheduled check "${job.name}" produced this output. Decide what, if anything, the owner needs to hear; if nothing, reply exactly [silent]:\n${output}`);
@@ -287,21 +457,48 @@ export class Scheduler {
 				}
 			}
 		} catch (error) {
-			console.error(`nano: job ${job.id} (${job.name}) failed:`, (error as Error)?.message ?? error);
+			// Delivery itself failed (the channel or the worker queue). Recorded, but a repair worker cannot fix that.
+			const reason = (error as Error)?.message ?? String(error);
+			console.error(`nano: job ${job.id} (${job.name}) could not be delivered:`, reason);
+			this.noteFailure(job, `delivery failed: ${reason}`, now);
 		}
 	}
 
 	private save(): void {
-		const tmp = `${this.path}.tmp`;
-		writeFileSync(tmp, JSON.stringify({ jobs: this.jobs }, null, 2));
-		renameSync(tmp, this.path);
+		writeJsonFile(this.path, { jobs: this.jobs });
 	}
+}
+
+/** A one-shot plain message: the one kind of job that is kept until it has been delivered. */
+function isReminder(job: Job): boolean {
+	return job.kind === "message" && job.at !== undefined;
+}
+
+/** Brief for the one repair attempt a failing job gets. A fix stays silent; a failure to fix reaches the owner. */
+function repairPrompt(job: Job, dataDir: string): string {
+	const health = job.health;
+	const schedule = job.cron ? `cron "${job.cron}"` : "one-time";
+	return [
+		`Scheduled job "${job.name}" (id ${job.id}, kind ${job.kind}, ${schedule}) is failing: ${health?.failures ?? 1} run(s) in a row.`,
+		`Latest error: ${health?.lastError ?? "unknown"}`,
+		job.kind === "script"
+			? `Its command runs with bash in ${join(dataDir, "workspace")}:\n${job.body}`
+			: `Its instructions:\n${job.body}`,
+		"",
+		"Try once to fix the cause. Read the script and the files it uses, find what broke, fix it, then run the command by hand to confirm it works.",
+		`You may fix the script, its state file or its inputs in the workspace. If the job's command itself is wrong, cancel job ${job.id} and add a corrected one with the same name, schedule and settings.`,
+		"You may not change credentials or anything in the vault, buy anything, grant new permissions, or change any other job.",
+		"If the fix needs the owner (a login, a credential, money, an account, or a change to what the job is for), do not work around it.",
+		`If you fixed it, answer exactly "FIXED: <what was wrong and what you changed>". That line is kept in the log and not sent to the owner.`,
+		"If you could not fix it, answer in one or two lines for the owner: what is wrong, what you tried, and what they need to do.",
+	].join("\n");
 }
 
 function runScript(command: string, cwd: string): Promise<string> {
 	return new Promise((resolve, reject) => {
 		execFile("bash", ["-c", command], { cwd, timeout: SCRIPT_TIMEOUT_MS, maxBuffer: 1024 * 1024 }, (error, stdout, stderr) => {
-			if (error) reject(new Error(`${error.message}${stderr ? `: ${stderr.slice(0, 300)}` : ""}`));
+			if (error?.killed) reject(new Error(`timed out after ${SCRIPT_TIMEOUT_MS / 1000}s${stderr ? `: ${stderr.slice(0, 300)}` : ""}`));
+			else if (error) reject(new Error(`${error.message}${stderr ? `: ${stderr.slice(0, 300)}` : ""}`));
 			else resolve(stdout.trim().slice(0, 8000));
 		});
 	});
