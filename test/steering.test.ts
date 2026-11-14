@@ -1,6 +1,10 @@
 import assert from "node:assert/strict";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { test } from "node:test";
 import { fauxAssistantMessage, fauxText, fauxToolCall } from "@earendil-works/pi-ai";
+import { loadConfig } from "../src/config.ts";
 import { scriptedConversation, toolResults } from "./helpers/scripted-session.ts";
 
 /** Longer than the 1.2 s burst window, so each say() is its own message. */
@@ -184,8 +188,13 @@ test("NANO_INBOUND=queue: a text sent mid-turn waits and gets a turn of its own"
 	await nano.conversation.dispose();
 });
 
-test("NANO_INBOUND rejects unknown values", async () => {
-	await assert.rejects(scriptedConversation({ packs: "core", env: { NANO_INBOUND: "steering" } }), /NANO_INBOUND must be/);
+test("NANO_INBOUND rejects unknown values", () => {
+	const dataDir = mkdtempSync(join(tmpdir(), "nano-test-"));
+	try {
+		assert.throws(() => loadConfig({ NANO_CHANNEL: "stdin", NANO_DATA_DIR: dataDir, NANO_INBOUND: "steering" }), /NANO_INBOUND must be/);
+	} finally {
+		rmSync(dataDir, { recursive: true, force: true });
+	}
 });
 
 test("a reply cancelled while it streams is never sent, not even the part already written", async () => {
@@ -219,5 +228,52 @@ test("a text that arrives while the turn is still setting up its session joins t
 	await noMoreReplies(nano);
 	assert.equal(seen.length, 1);
 	assert.match(seen[0] ?? "", /good morning[\s\S]*what's on today/);
+	await nano.conversation.dispose();
+});
+
+test("NANO_INBOUND=queue: a text that arrives while the session is being set up still gets its own turn", async () => {
+	const nano = await scriptedConversation({ packs: "core", env: { NANO_INBOUND: "queue" } });
+	nano.script([() => fauxAssistantMessage(fauxText("First.")), () => fauxAssistantMessage(fauxText("Second."))]);
+	const inner = nano.conversation as unknown as { pending: unknown[]; flushOwner: () => void };
+	for (const text of ["one", "two"]) {
+		inner.pending.push({ spaceId: "stdin", senderId: "stdin", messageId: text, text, files: [] });
+		inner.flushOwner();
+	}
+	assert.equal(await nano.next(), "First.");
+	assert.equal(await nano.next(), "Second.");
+	await nano.conversation.dispose();
+});
+
+test("a cancel keeps an earlier steered text the model had not seen yet ahead of the newer one", async () => {
+	const nano = await scriptedConversation({ packs: "core" });
+	const { held, release } = heldCall();
+	const seen: string[] = [];
+	nano.script([
+		async () => {
+			await held;
+			return fauxAssistantMessage(fauxText("never sent"));
+		},
+		(context) => {
+			seen.push(userTexts(context));
+			return fauxAssistantMessage(fauxText("Handled both."));
+		},
+	]);
+	nano.say("book the table for 7");
+	await wait(APART_MS);
+	// The rare race: a text steered just as the model call began, so it is still waiting in Pi's queue.
+	const inner = nano.conversation as unknown as {
+		run: { steered: unknown[] };
+		session: { steer: (text: string) => Promise<void> };
+	};
+	inner.run.steered.push({ from: "owner", spoken: "for four people", images: [] });
+	await inner.session.steer("for four people");
+	nano.say("actually make it 8");
+	await wait(APART_MS);
+	release();
+	assert.equal(await nano.next(), "Handled both.");
+	await noMoreReplies(nano);
+	assert.equal(seen.length, 1);
+	assert.match(seen[0] ?? "", /table for 7[\s\S]*four people[\s\S]*make it 8/);
+	assert.equal(seen[0]?.split("four people").length, 2, "the steered text appears once");
 	await nano.conversation.dispose();
 });

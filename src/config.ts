@@ -2,6 +2,8 @@ import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
+export const INBOUND_MODES = ["interrupt", "steer", "queue"] as const;
+
 export interface Config {
 	channel: "photon" | "stdin";
 	photonProjectId: string;
@@ -20,7 +22,7 @@ export interface Config {
 	 * being written and answers both, otherwise steers; "steer" only joins at the next model call;
 	 * "queue" waits for a turn of its own.
 	 */
-	inbound: "interrupt" | "steer" | "queue";
+	inbound: (typeof INBOUND_MODES)[number];
 	dataDir: string;
 	kbDir: string;
 	profileDir: string;
@@ -102,7 +104,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
 	if (Boolean(env.NANO_LOCAL_MODEL?.trim()) !== Boolean(env.NANO_LOCAL_BASE_URL?.trim())) {
 		problems.push("NANO_LOCAL_MODEL and NANO_LOCAL_BASE_URL must be set together");
 	}
-	if (!["interrupt", "steer", "queue"].includes(config.inbound)) problems.push("NANO_INBOUND must be interrupt, steer or queue");
+	if (!INBOUND_MODES.includes(config.inbound)) problems.push(`NANO_INBOUND must be one of: ${INBOUND_MODES.join(", ")}`);
 	if (config.local && !(config.local.contextWindow > 0)) problems.push("NANO_LOCAL_CONTEXT must be a number of tokens");
 	if (channel === "photon") {
 		if (!config.photonProjectId) problems.push("PHOTON_PROJECT_ID is not set");
