@@ -258,9 +258,10 @@ export class Conversation {
 			// Still setting up: the turn takes it into its prompt.
 			if (run.phase === "setup" || run.interrupted) return;
 			run.interrupted = true;
-			// A reply still being written is cancelled now. Otherwise the cancel waits for the next
-			// model call (the run starting, tools finishing, a retry) and never comes if the run ends.
-			if (run.phase === "model") this.abortRun();
+			// A reply still being written, or a wait to retry a failed call, is cancelled now. Otherwise
+			// the cancel waits for the next model call (the run starting, tools finishing) and never
+			// comes if the run ends.
+			if (run.phase === "model" || this.session?.isRetrying) this.abortRun();
 			return;
 		}
 		if (this.config.inbound === "interrupt") {
@@ -269,7 +270,7 @@ export class Conversation {
 			void this.queue.pushNext(work);
 			return;
 		}
-		if (streaming && this.config.inbound === "steer") {
+		if (streaming && this.config.inbound === "steer" && run.phase !== "done") {
 			void this.session?.steer(this.stamp(spoken), images).catch((error) => this.fail(error));
 			return;
 		}
@@ -298,8 +299,7 @@ export class Conversation {
 			const body = batch.map((w) => (w.from === "owner" ? this.stamp(w.spoken) : this.stamp(w.text, w.note))).join("\n\n");
 			await session.prompt(intro + body, images.length > 0 ? { images } : undefined);
 		} catch (error) {
-			// The cancel we asked for is not a failure; anything else still is.
-			if (!(run.aborted && /abort/i.test((error as Error)?.message ?? ""))) await this.fail(error);
+			await this.fail(error);
 		} finally {
 			this.run = undefined;
 			clearInterval(typing);

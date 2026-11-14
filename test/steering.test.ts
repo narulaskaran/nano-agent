@@ -279,7 +279,10 @@ test("a text sent while Pi waits to retry a failed model call cancels the retry;
 	]);
 	nano.say("book for 7");
 	assert.match(await nano.next(), /overloaded/, "the failed call is reported as before");
-	nano.say("actually 8");
+	// Straight in, without the burst window, so it surely lands while Pi waits to retry.
+	const inner = nano.conversation as unknown as { pending: unknown[]; flushOwner: () => void };
+	inner.pending.push({ spaceId: "stdin", senderId: "stdin", messageId: "m2", text: "actually 8", files: [] });
+	inner.flushOwner();
 	assert.equal(await nano.next(), "Booked for 8.");
 	await noMoreReplies(nano);
 	assert.equal(seen.length, 1, "the stale retry never reached the model");
