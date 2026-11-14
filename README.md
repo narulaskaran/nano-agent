@@ -1,139 +1,125 @@
 # Nano
 
-A small personal agent you text over iMessage. It runs as one Docker container, built on the [Pi](https://pi.dev) agent SDK, and reaches iMessage through [Photon](https://photon.codes). No Mac, no public URL, no other chat platforms.
+A small personal agent you text over iMessage, built to be cloned and run as your own copy. It is one Docker container on the [Pi](https://pi.dev) agent SDK, reaching iMessage through [Photon](https://photon.codes). No Mac, no public URL, no other chat platforms.
 
-What it does today:
+- **Chat over iMessage**: text and images in, text and files out. Only allow-listed numbers are answered.
+- **Reminders and scheduled jobs** it creates itself: one-time and conditional reminders, recurring tasks, and monitors that only speak when something changed.
+- **Memory on disk**: an owner profile, a Markdown knowledge base, and a searchable daily log. A new context window starts after a few hours of silence.
+- **Background tasks**: heavy work (research, browsing, checkouts) runs in separate sessions while Nano keeps answering.
+- **Optional local model** for private or light work that should not reach the cloud model.
+- **Guided first run**: the first conversation asks your name, timezone and what you want help with.
 
-- **Chat over iMessage** with text and images in, text and files out, typing indicators and read receipts. Only allow-listed numbers are answered.
-- **Reminders and scheduled jobs** the agent creates itself: one-time messages, conditional reminders, recurring tasks, and script monitors that only speak when something changed.
-- **Memory on disk**: a short owner profile, a Markdown knowledge base with index files, and a daily conversation log the agent can search.
-- **No session management for you**: after a few hours of silence the next text starts a fresh context window that carries over the last few messages. Long active stretches are compacted automatically.
-- **Background tasks**: heavy work (research, browsing, checkout flows) is handed to separate sessions, so Nano keeps answering while it runs and reports back when each one is done. Slow scheduled jobs can run the same way.
-- **Optional local model** for private or light work: emails and documents can be sorted and summarised on your own machine without reaching the cloud model.
-- **Web lookups**, a shell and file tools inside the container.
-- **Guided first run**: the first conversation asks your name, timezone and what you want help with, then saves them.
+## Deploy
 
-## Quick start
+You need a Linux or macOS host with Docker (Compose v2, about 4 GB of RAM for the container), a Photon project, and one model API key.
 
-You need Docker, a Photon project, and one model API key.
+1. **Photon**: sign up at [app.photon.codes](https://app.photon.codes), create a project, enable iMessage, register your phone number, and copy the project ID and secret from its settings.
+2. **Model key**: the default is DeepSeek (`DEEPSEEK_API_KEY`). Any other provider works; see [Configuration](#configuration).
+3. **Clone and configure**:
+
+   ```bash
+   git clone https://github.com/narulaskaran/nano-agent.git nano && cd nano
+   cp .env.example .env
+   ```
+
+   Edit `.env` and set `PHOTON_PROJECT_ID`, `PHOTON_PROJECT_SECRET`, `NANO_ALLOWED_USERS` (your own number in E.164 form, such as `+15551234567`; replace the example value) and your model key. If your host user is not uid 1000, also set `NANO_UID` and `NANO_GID` to `id -u` and `id -g` so `./data` stays yours.
+4. **Build and check**. The first build is slow because every pack's system dependencies (including a browser) are installed.
+
+   ```bash
+   docker compose build
+   docker compose run --rm nano node /app/src/index.ts --check   # must end with "nano: check ok"
+   ```
+
+   `--check` validates the model, its credentials and the local-model endpoint. It does not test Photon, so confirm that in the next step.
+5. **Start and verify**:
+
+   ```bash
+   docker compose up -d
+   docker compose logs -f nano    # expect "Spectrum started" and "nano: listening on photon"
+   ```
+
+   Text your Photon number from the allow-listed phone. The first reply, within about a minute, starts the onboarding chat.
+
+No reply? Look in the logs for `ignoring message from non-allowed sender` (the number differs from `NANO_ALLOWED_USERS`) or a model error (missing or wrong key).
+
+Handing the repo to a coding agent? [AGENTS.md](AGENTS.md) has the same procedure written for it.
+
+## Run it
 
 ```bash
-git clone <this repo> nano && cd nano
-cp .env.example .env      # fill in the four required values
-docker compose up -d --build
-docker compose logs -f nano
+docker compose logs -f nano                # watch
+docker compose restart nano                # after editing .env
+git pull && docker compose up -d --build   # update, or after changing NANO_PACKS
+docker compose down                        # stop
 ```
 
-Then text your Photon number from the phone number you allow-listed. To verify the configuration without connecting, run `docker compose run --rm nano node /app/src/index.ts --check`.
+Two git-ignored directories hold everything that is yours, so **back up both**:
 
-If you hand this repo to a coding agent, point it at [AGENTS.md](AGENTS.md); it has the full setup procedure.
+- `data/`: sessions, logs, profile, knowledge base, schedule state, and your own packs in `data/packs/`.
+- `vault/`: credentials, used only by the `vault` pack and mounted separately on purpose.
+
+## Security
+
+- Nano has a shell and file tools inside the container, and it can read its own environment, so a model key in `.env` is visible to it. Use a dedicated key with a spend limit.
+- Anyone in `NANO_ALLOWED_USERS` can drive the agent. List only yourself, or people you would hand a shell to.
+- The [vault pack](packs/vault/README.md) keeps website logins and API keys where the agent can use them but not read them.
 
 ## Configuration
 
-Everything is in `.env` (see [.env.example](.env.example)).
+Everything is in `.env`; [.env.example](.env.example) documents each setting inline.
 
-| Variable | Required | Meaning |
-|---|---|---|
-| `PHOTON_PROJECT_ID`, `PHOTON_PROJECT_SECRET` | yes | From your Photon project settings |
-| `NANO_ALLOWED_USERS` | yes | Your phone number(s) in E.164 form, comma separated |
-| A model key, e.g. `DEEPSEEK_API_KEY` | yes | The key for the provider named in `NANO_MODEL` |
-| `NANO_MODEL` | no | `provider/model-id`, default `deepseek/deepseek-flash` |
-| `BRAVE_SEARCH_API_KEY` | no | Enables the `web_search` tool |
-| `TZ` | no | Fallback timezone until Nano learns yours |
-| `NANO_IDLE_HOURS` | no | Silence before a fresh context window, default 4 |
-| `NANO_PACKS` | no | Skill packs to load, default `core` |
-| `NANO_MAX_TASKS` | no | Background tasks running at once, default 3; more wait in a queue |
-| `NANO_TASK_TIMEOUT_MINUTES` | no | A background task still running after this is stopped and reported, default 30 |
-| `NANO_LOCAL_MODEL`, `NANO_LOCAL_BASE_URL` | no | A local model id and its OpenAI-compatible `/v1` endpoint (llama.cpp, Ollama, ...) |
-| `NANO_LOCAL_API_KEY`, `NANO_LOCAL_CONTEXT` | no | Its key if it needs one, and its context window in tokens (default 32768) |
+| Variable | Meaning |
+|---|---|
+| `PHOTON_PROJECT_ID`, `PHOTON_PROJECT_SECRET` | **Required.** From your Photon project settings. |
+| `NANO_ALLOWED_USERS` | **Required.** Phone numbers in E.164 form, comma separated. |
+| A model key | **Required.** The key for the provider named in `NANO_MODEL` (`DEEPSEEK_API_KEY`, `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `OPENROUTER_API_KEY`, `GEMINI_API_KEY`, ...). |
+| `NANO_MODEL` | `provider/model-id`, default `deepseek/deepseek-flash`. |
+| `NANO_THINKING` | Thinking effort: off, minimal, low (default), medium, high. |
+| `NANO_PACKS` | Packs to load, default `core`. Rebuild after changing it. |
+| `TZ` | Fallback timezone until Nano learns yours. |
+| `BRAVE_SEARCH_API_KEY` | Enables the `web_search` tool. |
+| `NANO_UID`, `NANO_GID` | Owner of `./data` inside the container, default 1000. |
 
-### Background tasks and the local model
+<details>
+<summary>Advanced settings</summary>
 
-The agent hands heavy work to a background task with the `delegate` tool: a separate Pi session with the same tools and skills, minus delegation and messaging the owner. When it ends, only its final answer (not its transcript) is passed back to the main conversation, which tells you about it. Task sessions are kept in `data/sessions/tasks/`, their state in `data/tasks.json`; tasks cut off by a restart are reported once on startup, and results that finished but were not yet relayed are relayed then. Scheduled `task` jobs take `background: true` to run the same way.
+| Variable | Meaning |
+|---|---|
+| `NANO_IDLE_HOURS` | Silence before a fresh context window, default 4. |
+| `NANO_MAX_TASKS` | Background tasks at once, default 3; more wait in a queue. |
+| `NANO_TASK_TIMEOUT_MINUTES` | A task still running after this is stopped and reported, default 30. |
+| `NANO_LOCAL_MODEL`, `NANO_LOCAL_BASE_URL` | A local model id and its OpenAI-compatible `/v1` endpoint (llama.cpp, Ollama, ...). |
+| `NANO_LOCAL_API_KEY`, `NANO_LOCAL_CONTEXT` | Its key if it needs one, and its context window in tokens (default 32768). |
+| `NANO_EVENT_OUTBOX_DIRS` | Extra trusted spool directories, comma separated. |
 
-### When a scheduled job fails
+To reach a local model on the Docker host, use `http://host.docker.internal:<port>/v1`. On Linux, add `extra_hosts: ["host.docker.internal:host-gateway"]` to a `compose.override.yaml` (git-ignored).
 
-Each job's health (consecutive failures, last error, last success) is kept in `data/schedule.json` and shown by `schedule_list`. Nano tries to fix things before it asks you:
-
-- **Transient errors** (timeouts, network errors, rate limits, 5xx) wait for the next run. After 3 failed runs in a row, or an hour, they are treated as real failures.
-- **A real failure** starts one background repair: a worker briefed with the job and its error, allowed to fix the job's script, state and inputs but not credentials, purchases, permissions or other jobs. A successful fix is silent (kept in `data/tasks.json` and the log); if it cannot fix the job, its answer (what is wrong, what it needs from you) is relayed to you.
-- **Still failing 30 minutes after the repair**, you are told once. You hear about that job again only when it works.
-- **One-time reminders** whose send fails are retried for 10 minutes, then you get the reminder text with a note that it is late.
-- **Unreadable state files** are kept as `<file>.corrupt-<time>` instead of being silently replaced.
-
-Work can ask for the local model in two strengths:
-
-- `model: "local"` prefers the local model and falls back to the main model, with a note, when none is configured.
-- `private: true` runs only on the local model and is refused when none is configured. It never falls back to the cloud.
-
-A private task's content stays on the local model, but its final answer goes to the main (cloud) model so Nano can tell you about it. Private instructions should ask for only what you need, such as "amount and due date", not "summarise the email". `ask_local` (a tool) and `nano-local` (a command for scripts, e.g. `nano-local "Is this a bill?" --choices yes,no < mail.txt`) make one-shot classification or extraction calls whose input never enters a conversation.
-
-## Layout
-
-```
-src/            the runtime (TypeScript, no build step)
-  index.ts      wiring and shutdown
-  channel.ts    Photon iMessage channel, plus a stdin channel for local testing
-  agent.ts      one conversation: Pi session, idle rollover, message bursts, turn queue
-  session.ts    Pi session setup shared by conversations and workers
-  tasks.ts      background tasks: queue, limits, persistence, hand-back
-  worker.ts     runs a background task in its own Pi session
-  models.ts     model runtime, local model provider, main/local/private choice
-  local.ts      one-shot local model calls (ask_local, nano-local)
-  scheduler.ts  reminders, cron jobs, script monitors, outbox
-  packs.ts      pack loading
-  tools.ts      tools added on top of Pi's built-ins
-  task-tools.ts delegate and task management tools
-  prompt.ts     system prompt assembly
-bin/            commands on PATH (nano-local)
-prompts/        the standing prompt
-packs/<name>/   capabilities shipped with Nano
-templates/kb/   starter knowledge base for new installs
-data/           everything personal: sessions, logs, profile, knowledge base, private packs (git-ignored)
-```
-
-All personal state lives in `data/`. Nothing in it belongs in this repository.
+</details>
 
 ## Packs
 
-A pack is a folder that adds one capability. `NANO_PACKS` lists the ones to load.
-
-```
-<pack>/skills/<skill>/SKILL.md   Agent Skills, advertised to the model and read on demand
-<pack>/extension.ts              optional: tools and hooks (default export `(ctx) => ExtensionFactory`)
-<pack>/bin/                      optional: commands put on PATH for the agent's shell
-<pack>/install.sh                optional: system dependencies, run when the image is built
-<pack>/start-root.sh             optional: run as root at container start, before privileges drop (a pack under `data/packs/` cannot use this)
-<pack>/env.example               optional: settings the pack reads
-```
-
-Packs in `packs/` ship with Nano and should be useful to anyone. Your own workflows go in `data/packs/<name>/` with the same layout; they are loaded the same way and never leave your machine.
+A pack adds one capability. Enable them in `NANO_PACKS` (for example `core,google`) and rebuild. Packs with their own settings ship an `env.example` to copy into `.env`.
 
 | Pack | What it adds |
 |---|---|
 | `core` | Scheduling patterns for reminders, monitors and heartbeats. |
-| `purchases` | A headless `browser` command and Stripe Link (`link-cli`) for buying things: virtual cards, Link Pay Tokens, shared payment tokens, HTTP 402 payments. Link's own app approval is the gate. See [packs/purchases](packs/purchases/README.md). |
-| `vault` | A credential store the agent can use and cannot read: website logins and API keys held by a separate user, with a write-only portal on the tailnet. Needs `purchases` for the browser. See [packs/vault](packs/vault/README.md). |
-| `google` | Gmail and Google Calendar through a `google` command, connected over chat. See [packs/google](packs/google/README.md). |
-| `mcp` | Any MCP server, listed in `data/pi/mcp.json`, with tools loaded on demand. See [packs/mcp](packs/mcp/README.md). |
-| `t3code` | Hands coding work to a T3 Code server and reports back. Needs `mcp`. See [packs/t3code](packs/t3code/README.md). |
+| `google` | Gmail and Google Calendar, connected over chat. [Setup](packs/google/README.md) |
+| `mcp` | Any MCP server listed in `data/pi/mcp.json`. [Setup](packs/mcp/README.md) |
+| `purchases` | A headless browser and Stripe Link for buying things; Link's own app approval is the gate. [Setup](packs/purchases/README.md) |
+| `vault` | Credentials the agent can use and cannot read, plus a write-only portal that must be reachable from the container over a tailnet or LAN address. Needs `purchases`. [Setup](packs/vault/README.md) |
+| `speech` | Voice memo transcription and spoken replies. Needs `vault`. [Setup](packs/speech/README.md) |
+| `t3code` | Hands coding work to a T3 Code server. Needs `mcp`. [Setup](packs/t3code/README.md) |
+| `agentmail` | Hands AgentMail inbox events to Nano; adapts an existing monitor. [Setup](packs/agentmail/README.md) |
 
-Each pack documents its own settings in `packs/<name>/env.example`.
+Your own workflows go in `data/packs/<name>/` and never leave your machine. To write a pack, see [AGENTS.md](AGENTS.md#packs).
 
-## Sending through Nano from other programs
+## How it behaves
 
-Anything on the machine can have Nano text the owner by dropping a file into `data/outbox/`: a `.txt` file is sent as is; a `.json` file is `{"text": "...", "kind": "message" | "task"}`, where `task` hands the text to the agent as instructions. Write to a temporary name and rename, so a half-written file is never picked up.
+- **Background tasks.** The agent hands heavy work to a separate session with the same tools, and only the final answer comes back. Tasks cut off by a restart are reported on the next start.
+- **Failing scheduled jobs.** Transient errors wait for the next run. A real failure starts one background repair; if that cannot fix it, you are told what is wrong, once. One-time reminders that fail to send are retried for 10 minutes, then delivered with a note that they are late. Job health is in `data/schedule.json`.
+- **Local and private work.** `model: "local"` prefers the local model and falls back to the main one. `private: true` runs only on the local model and is refused when none is configured; its final answer still goes through the main model so Nano can tell you about it, so keep private instructions narrow. `ask_local` and `nano-local` make one-shot classification calls that never enter a conversation.
+- **Other programs can message you.** Drop a `.txt` file (sent as is) or a `.json` file (`{"text": "...", "kind": "message" | "task"}`, where `task` hands the text to the agent as instructions) into `data/outbox/`. Write to a temporary name and rename it so a half-written file is never picked up.
 
-## Development
+## Contributing
 
-```bash
-npm install --ignore-scripts
-npm run typecheck && npm test
-NANO_CHANNEL=stdin NANO_DATA_DIR=/tmp/nano-dev DEEPSEEK_API_KEY=... npm start   # type messages on stdin
-```
-
-### Provider settings and speech
-
-With the `vault` pack enabled, its portal manages provider connections and per-job model choices: main conversation, background work, private/local work, transcription and speech generation. It supports OpenAI-compatible, Anthropic Messages and custom JSON API shapes, plus native Bark and Woof speech services. API keys remain in the vault; local private work cannot fall back to a hosted provider. See [vault](packs/vault/README.md).
-
-Enable the [speech pack](packs/speech/README.md) too for `nano-speech stt` and `nano-speech tts`, audio conversion and the corresponding skill. Provider settings persist in the vault volume and take effect on the next request.
+Code layout, pack format, and development commands are in [AGENTS.md](AGENTS.md).
