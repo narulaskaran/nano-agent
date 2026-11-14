@@ -22,10 +22,51 @@ If there is no reply: check the logs for `ignoring message from non-allowed send
 
 - Node 24, TypeScript run directly with no build step. Use erasable syntax only (no enums, no parameter properties).
 - `npm run typecheck && npm test` must pass before you call a change done.
-- Test conversation behaviour locally with `NANO_CHANNEL=stdin` and a throwaway `NANO_DATA_DIR`.
+- Test conversation behaviour locally with `NANO_CHANNEL=stdin` and a throwaway `NANO_DATA_DIR`: `npm install --ignore-scripts`, then `NANO_CHANNEL=stdin NANO_DATA_DIR=/tmp/nano-dev DEEPSEEK_API_KEY=... npm start` and type messages on stdin.
 - Keep the runtime small. Prefer a skill (Markdown) over new runtime code when instructions are enough.
-- New capabilities are packs (see "Packs" in the README). A pack keeps everything it needs inside `packs/<name>/` and touches `src/` only when the runtime truly lacks a hook. Shipped packs must be useful to any owner; anything specific to one person belongs in `data/packs/`, outside the repository.
+- New capabilities are packs (see "Packs" below). A pack keeps everything it needs inside `packs/<name>/` and touches `src/` only when the runtime truly lacks a hook. Shipped packs must be useful to any owner; anything specific to one person belongs in `data/packs/`, outside the repository.
 - `@spectrum-ts/*` and `@earendil-works/pi-*` are pinned to exact versions; both ship breaking changes. Read their type definitions in `node_modules` before changing calls into them.
+
+## Layout
+
+```
+src/            the runtime (TypeScript, no build step)
+  index.ts      wiring and shutdown
+  channel.ts    Photon iMessage channel, plus a stdin channel for local testing
+  agent.ts      one conversation: Pi session, idle rollover, message bursts, turn queue
+  session.ts    Pi session setup shared by conversations and workers
+  tasks.ts      background tasks: queue, limits, persistence, hand-back
+  worker.ts     runs a background task in its own Pi session
+  models.ts     model runtime, local model provider, main/local/private choice
+  local.ts      one-shot local model calls (ask_local, nano-local)
+  scheduler.ts  reminders, cron jobs, script monitors, outbox
+  packs.ts      pack loading
+  tools.ts      tools added on top of Pi's built-ins
+  task-tools.ts delegate and task management tools
+  prompt.ts     system prompt assembly
+bin/            commands on PATH (nano-local)
+prompts/        the standing prompt
+packs/<name>/   capabilities shipped with Nano
+templates/kb/   starter knowledge base for new installs
+data/           everything personal (git-ignored); vault/ holds credentials (git-ignored)
+```
+
+Nothing in `data/` or `vault/` belongs in this repository.
+
+## Packs
+
+A pack is a folder that adds one capability. `NANO_PACKS` lists the ones to load.
+
+```
+<pack>/skills/<skill>/SKILL.md   Agent Skills, advertised to the model and read on demand
+<pack>/extension.ts              optional: tools and hooks (default export `(ctx) => ExtensionFactory`)
+<pack>/bin/                      optional: commands put on PATH for the agent's shell
+<pack>/install.sh                optional: system dependencies, run when the image is built
+<pack>/start-root.sh             optional: run as root at container start, before privileges drop (a pack under `data/packs/` cannot use this)
+<pack>/env.example               optional: settings the pack reads
+```
+
+Packs in `packs/` ship with Nano and should be useful to anyone. Personal workflows go in `data/packs/<name>/` with the same layout. When you add a shipped pack, add a row to the pack table in the README.
 
 ## Zero personal data
 
