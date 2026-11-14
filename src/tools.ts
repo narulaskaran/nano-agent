@@ -6,7 +6,7 @@ import type { Channel } from "./channel.ts";
 import { type Config, currentTimezone } from "./config.ts";
 import { ask, askLocal, type ChatFn } from "./local.ts";
 import { chooseModel } from "./models.ts";
-import { type Job, parseLocalTime, type Scheduler } from "./scheduler.ts";
+import { cronMatches, type Job, parseLocalTime, type Scheduler } from "./scheduler.ts";
 import { workspaceDir } from "./session.ts";
 
 export const text = (value: string) => ({ content: [{ type: "text" as const, text: value }], details: {} });
@@ -70,7 +70,26 @@ function describeJob(job: Job, timeZone: string): string {
 		? new Intl.DateTimeFormat("en-US", { timeZone, dateStyle: "medium", timeStyle: "short" }).format(job.at)
 		: `cron ${job.cron}${job.until ? ` until ${new Date(job.until).toISOString().slice(0, 10)}` : ""}`;
 	const background = job.background ? ` [background${job.private ? ", private" : job.model === "local" ? ", local" : ""}]` : "";
-	return `${job.id} | ${job.name} | ${job.kind}${job.then ? `->${job.then}` : ""}${background} | ${when} | ${job.body.replace(/\s+/g, " ").slice(0, 120)}`;
+	return `${job.id} | ${job.name} | ${job.kind}${job.then ? `->${job.then}` : ""}${background} | ${when} | ${describeHealth(job, timeZone)} | ${job.body.replace(/\s+/g, " ").slice(0, 120)}`;
+}
+
+/** Health column of schedule_list, so a broken job is visible without reading logs. */
+export function describeHealth(job: Job, timeZone: string): string {
+	if (job.cron) {
+		try {
+			cronMatches(job.cron, new Date(), timeZone);
+		} catch (error) {
+			return `UNUSABLE SCHEDULE (${(error as Error).message})`;
+		}
+	}
+	const stamp = (ms: number) => new Intl.DateTimeFormat("en-US", { timeZone, dateStyle: "short", timeStyle: "short" }).format(ms);
+	const health = job.health;
+	if (health?.failures) {
+		const notes = [health.repairAt !== undefined ? "repair tried" : "", health.escalated ? "owner told" : ""].filter(Boolean).join(", ");
+		return `FAILING x${health.failures} since ${stamp(health.since ?? health.lastFailure ?? Date.now())}${notes ? ` (${notes})` : ""}: ${(health.lastError ?? "").slice(0, 120)}`;
+	}
+	if (health?.lastSuccess) return `ok, last ${stamp(health.lastSuccess)}`;
+	return job.lastFired ? "ran, no health record" : "not run yet";
 }
 
 /**
@@ -139,7 +158,7 @@ export function nanoTools(
 		pi.registerTool({
 			name: "schedule_list",
 			label: "List schedule",
-			description: "List everything currently scheduled (id | name | kind | when | body).",
+			description: "List everything currently scheduled (id | name | kind | when | health | body). Health shows failing jobs, repairs tried, and the last success.",
 			parameters: Type.Object({}),
 			async execute() {
 				const jobs = scheduler.list();

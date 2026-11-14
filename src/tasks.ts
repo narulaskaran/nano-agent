@@ -1,5 +1,5 @@
 import { randomBytes } from "node:crypto";
-import { existsSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { readJsonFile, writeJsonFile } from "./json-store.ts";
 import type { ModelRole } from "./models.ts";
 
 /**
@@ -20,6 +20,10 @@ export interface TaskSpec {
 	spaceId: string;
 	/** "schedule": started by a background scheduled job; a [silent] result is dropped. */
 	source: "delegate" | "schedule";
+	/** The scheduled job this run belongs to. Its outcome goes to the scheduler's failure policy. */
+	jobId?: string;
+	/** A repair of this scheduled job. A successful repair (result starting "FIXED:") is not passed on. */
+	repairOf?: string;
 }
 
 export interface TaskResult {
@@ -57,6 +61,8 @@ export interface TaskManagerOptions {
 	runner: TaskRunner;
 	/** Hands a finished task to the main conversation as a non-owner event. Calls arrive in completion order. */
 	handBack: (spaceId: string, prompt: string) => Promise<void>;
+	/** Called when a run of a scheduled job (one with a jobId) ends. */
+	onJobRunEnded?: (task: Task) => void;
 	now?: () => number;
 }
 
@@ -64,6 +70,9 @@ const KEEP_FINISHED = 50;
 const RESULT_CHARS = 4000;
 
 export const isSilent = (text: string | undefined): boolean => /^\[silent\]\.?$/i.test((text ?? "").trim());
+
+/** A repair worker's answer when it fixed the job. */
+export const isRepaired = (text: string | undefined): boolean => /^FIXED:/i.test((text ?? "").trim());
 
 function clip(text: string, max: number): string {
 	return text.length > max ? `${text.slice(0, max)}\n[cut at ${max} of ${text.length} characters]` : text;
@@ -75,6 +84,8 @@ export function handBackPrompt(task: Task): string | undefined {
 	const scheduled = task.source === "schedule";
 	if (task.status === "done") {
 		if (scheduled && isSilent(task.result)) return undefined;
+		// The owner asked for successful repairs to stay silent; the fix stays in tasks.json and the log.
+		if (task.repairOf && isRepaired(task.result)) return undefined;
 		return [
 			`${head} finished${task.model ? ` (ran on ${task.model})` : ""}.`,
 			task.note ?? "",
@@ -88,6 +99,8 @@ export function handBackPrompt(task: Task): string | undefined {
 			.join("\n");
 	}
 	if (task.status === "failed") {
+		// A scheduled job's failure goes to the scheduler, which retries, repairs or tells the owner.
+		if (task.jobId) return undefined;
 		return `${head} failed: ${task.error ?? "unknown error"}\nTell the owner briefly, and offer to retry if it still matters.`;
 	}
 	return undefined;
@@ -115,11 +128,8 @@ export class TaskManager {
 	constructor(options: TaskManagerOptions) {
 		this.options = options;
 		this.now = options.now ?? Date.now;
-		try {
-			if (existsSync(options.path)) this.tasks = JSON.parse(readFileSync(options.path, "utf8")).tasks ?? [];
-		} catch (error) {
-			console.error("nano: could not read tasks file, starting empty:", (error as Error)?.message ?? error);
-		}
+		const stored = readJsonFile<{ tasks?: Task[] } | null>(options.path, null);
+		if (Array.isArray(stored?.tasks)) this.tasks = stored.tasks;
 		// Anything that was queued or running belonged to a previous process and is gone.
 		for (const task of this.tasks) {
 			if (task.status === "queued" || task.status === "running") {
@@ -234,6 +244,14 @@ export class TaskManager {
 		Object.assign(task, fields, { status, endedAt: this.now() });
 		this.save();
 		console.error(`nano: task ${task.id} (${task.title}) ${status}${task.error ? `: ${task.error}` : ""}`);
+		if (task.repairOf && status === "done") console.error(`nano: repair of job ${task.repairOf}: ${(task.result ?? "").replace(/\s+/g, " ").slice(0, 300)}`);
+		if (task.jobId) {
+			try {
+				this.options.onJobRunEnded?.(task);
+			} catch (error) {
+				console.error(`nano: job outcome for task ${task.id} not recorded:`, error);
+			}
+		}
 		void this.deliver(task);
 	}
 
@@ -260,8 +278,6 @@ export class TaskManager {
 			const drop = new Set(finished.slice(0, finished.length - KEEP_FINISHED));
 			this.tasks = this.tasks.filter((t) => !drop.has(t));
 		}
-		const tmp = `${this.options.path}.tmp`;
-		writeFileSync(tmp, JSON.stringify({ tasks: this.tasks }, null, 2));
-		renameSync(tmp, this.options.path);
+		writeJsonFile(this.options.path, { tasks: this.tasks });
 	}
 }

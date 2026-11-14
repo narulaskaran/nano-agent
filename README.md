@@ -51,6 +51,16 @@ Everything is in `.env` (see [.env.example](.env.example)).
 
 The agent hands heavy work to a background task with the `delegate` tool: a separate Pi session with the same tools and skills, minus delegation and messaging the owner. When it ends, only its final answer (not its transcript) is passed back to the main conversation, which tells you about it. Task sessions are kept in `data/sessions/tasks/`, their state in `data/tasks.json`; tasks cut off by a restart are reported once on startup, and results that finished but were not yet relayed are relayed then. Scheduled `task` jobs take `background: true` to run the same way.
 
+### When a scheduled job fails
+
+Each job's health (consecutive failures, last error, last success) is kept in `data/schedule.json` and shown by `schedule_list`. Nano tries to fix things before it asks you:
+
+- **Transient errors** (timeouts, network errors, rate limits, 5xx) wait for the next run. After 3 failed runs in a row, or an hour, they are treated as real failures.
+- **A real failure** starts one background repair: a worker briefed with the job and its error, allowed to fix the job's script, state and inputs but not credentials, purchases, permissions or other jobs. A successful fix is silent (kept in `data/tasks.json` and the log); if it cannot fix the job, its answer (what is wrong, what it needs from you) is relayed to you.
+- **Still failing 30 minutes after the repair**, you are told once. You hear about that job again only when it works.
+- **One-time reminders** whose send fails are retried for 10 minutes, then you get the reminder text with a note that it is late.
+- **Unreadable state files** are kept as `<file>.corrupt-<time>` instead of being silently replaced.
+
 Work can ask for the local model in two strengths:
 
 - `model: "local"` prefers the local model and falls back to the main model, with a note, when none is configured.

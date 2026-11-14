@@ -126,7 +126,7 @@ async function auth(ctx: Ctx, command: string | undefined, argv: string[]): Prom
 				const who = await account(ctx, auth.grantedScopes());
 				if (!values.quiet) io.out(`ok: ${who || "connected"}${auth.shared ? " (shared token)" : ""}. Access: ${access(auth.grantedScopes())}.`);
 			} catch (error) {
-				// The scheduler only delivers output of commands that exit 0, so quiet mode reports and succeeds.
+				// Quiet mode reports and exits 0, so the scheduler sends the line as is instead of treating the check as broken and trying a repair.
 				if (!values.quiet) throw error;
 				io.out(oneLine(`Google connection check failed: ${(error as Error).message}`, 300));
 			}

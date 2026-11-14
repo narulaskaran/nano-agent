@@ -1,9 +1,10 @@
-import { appendFileSync, existsSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import type { AgentSession, ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import type { Channel, Inbound } from "./channel.ts";
 import { type Config, currentTimezone, localStamp } from "./config.ts";
+import { readJsonFile, writeJsonFile } from "./json-store.ts";
 import { refreshProviderSettings } from "./provider-settings.ts";
 import { packExtensions } from "./packs.ts";
 import { buildSystemPrompt } from "./prompt.ts";
@@ -37,11 +38,7 @@ export class StateStore {
 
 	constructor(dataDir: string) {
 		this.path = join(dataDir, "state.json");
-		try {
-			this.data = existsSync(this.path) ? JSON.parse(readFileSync(this.path, "utf8")) : { spaces: {} };
-		} catch {
-			this.data = { spaces: {} };
-		}
+		this.data = readJsonFile<{ spaces: Record<string, SpaceState> } | null>(this.path, null) ?? { spaces: {} };
 		this.data.spaces ??= {};
 	}
 
@@ -51,9 +48,7 @@ export class StateStore {
 	}
 
 	save(): void {
-		const tmp = `${this.path}.tmp`;
-		writeFileSync(tmp, JSON.stringify(this.data, null, 2));
-		renameSync(tmp, this.path);
+		writeJsonFile(this.path, this.data);
 	}
 }
 
@@ -175,9 +170,12 @@ export class Conversation {
 		return this.queue.push({ from: "system", text: prompt, note });
 	}
 
-	/** Send text to the owner that the agent did not write this turn (plain reminders, script output). */
+	/**
+	 * Send text to the owner that the agent did not write this turn (plain reminders, script output).
+	 * Unlike a reply, a failed send throws, so the scheduler can retry or report it.
+	 */
 	async deliver(text: string): Promise<void> {
-		await this.say(text);
+		await this.say(text, true);
 	}
 
 	async dispose(): Promise<void> {
@@ -284,9 +282,14 @@ export class Conversation {
 		return { session, carry };
 	}
 
-	private async say(text: string): Promise<void> {
+	private async say(text: string, rethrow = false): Promise<void> {
 		// A scheduled task with nothing worth reporting answers [silent].
 		if (isSilent(text)) return;
+		if (rethrow) {
+			await this.channel.send(this.spaceId, text);
+			this.record("nano", text); // only once it was sent, so a retry is not logged twice
+			return;
+		}
 		this.record("nano", text);
 		try {
 			await this.channel.send(this.spaceId, text);
