@@ -86,6 +86,7 @@ Everything is in `.env`; [.env.example](.env.example) documents each setting inl
 | Variable | Meaning |
 |---|---|
 | `NANO_IDLE_HOURS` | Silence before a fresh context window, default 4. |
+| `NANO_INBOUND` | A text sent while Nano is working. `interrupt` (default): one reply answers everything you sent; a reply still being written is cancelled and never sent, a started tool call finishes first, and a scheduled job is never cancelled (the text gets its own turn right after). `steer`: once a model run has started, the text joins its next model call, so a reply already being written still goes out on its own. `queue`: the text waits for a turn of its own, in order. |
 | `NANO_MAX_TASKS` | Background tasks at once, default 3; more wait in a queue. |
 | `NANO_TASK_TIMEOUT_MINUTES` | A task still running after this is stopped and reported, default 30. |
 | `NANO_LOCAL_MODEL`, `NANO_LOCAL_BASE_URL` | A local model id and its OpenAI-compatible `/v1` endpoint (llama.cpp, Ollama, ...). |
