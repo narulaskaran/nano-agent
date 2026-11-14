@@ -255,21 +255,25 @@ export class Conversation {
 			// During the owner's own turn every new text goes through the queue (never Pi's steering
 			// queue), so one turn answers them all, in order.
 			void this.queue.pushNext(work);
-			// setup: the turn takes it into its prompt. done: the reply is out; it gets the next turn.
-			if (run.phase === "setup" || run.phase === "done" || run.interrupted) return;
+			// Still setting up: the turn takes it into its prompt.
+			if (run.phase === "setup" || run.interrupted) return;
 			run.interrupted = true;
-			// A reply still being written is cancelled now. Otherwise the cancel waits for the run to
-			// start or for running tools to finish, and lands before the model writes anything else.
+			// A reply still being written is cancelled now. Otherwise the cancel waits for the next
+			// model call (the run starting, tools finishing, a retry) and never comes if the run ends.
 			if (run.phase === "model") this.abortRun();
 			return;
 		}
-		if (streaming && this.config.inbound !== "queue" && run.phase !== "done") {
-			// A scheduled job or task result is never cancelled: the text joins its next model call.
+		if (this.config.inbound === "interrupt") {
+			// A scheduled job or task result is never cancelled, and the text is not steered into it
+			// (it could be answered "[silent]", or land after the run ends): it gets the next turn.
+			void this.queue.pushNext(work);
+			return;
+		}
+		if (streaming && this.config.inbound === "steer") {
 			void this.session?.steer(this.stamp(spoken), images).catch((error) => this.fail(error));
 			return;
 		}
-		if (this.config.inbound === "interrupt") void this.queue.pushNext(work);
-		else void this.queue.push(work);
+		void this.queue.push(work);
 	}
 
 	private abortRun(): void {
@@ -295,7 +299,7 @@ export class Conversation {
 			await session.prompt(intro + body, images.length > 0 ? { images } : undefined);
 		} catch (error) {
 			// The cancel we asked for is not a failure; anything else still is.
-			if (!run.aborted) await this.fail(error);
+			if (!(run.aborted && /abort/i.test((error as Error)?.message ?? ""))) await this.fail(error);
 		} finally {
 			this.run = undefined;
 			clearInterval(typing);

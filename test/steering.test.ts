@@ -266,3 +266,47 @@ test("a text sent while the model is still writing a tool call lets that tool ru
 	assert.match(seen[0]?.users ?? "", /table for 7[\s\S]*make it 8/);
 	await nano.conversation.dispose();
 });
+
+test("a text sent while Pi waits to retry a failed model call cancels the retry; one reply answers both", async () => {
+	const nano = await scriptedConversation({ packs: "core" });
+	const seen: string[] = [];
+	nano.script([
+		() => fauxAssistantMessage([], { stopReason: "error", errorMessage: "503 overloaded, please retry" }),
+		(context) => {
+			seen.push(userTexts(context));
+			return fauxAssistantMessage(fauxText("Booked for 8."));
+		},
+	]);
+	nano.say("book for 7");
+	assert.match(await nano.next(), /overloaded/, "the failed call is reported as before");
+	nano.say("actually 8");
+	assert.equal(await nano.next(), "Booked for 8.");
+	await noMoreReplies(nano);
+	assert.equal(seen.length, 1, "the stale retry never reached the model");
+	assert.match(seen[0] ?? "", /book for 7[\s\S]*actually 8/);
+	await nano.conversation.dispose();
+});
+
+test("a text sent during a scheduled job is not steered into it; it gets its own turn right after", async () => {
+	const nano = await scriptedConversation({ packs: "core" });
+	const seen: string[] = [];
+	nano.script([
+		() => fauxAssistantMessage(fauxToolCall("bash", { command: "sleep 3" })),
+		(context) => {
+			seen.push(userTexts(context));
+			return fauxAssistantMessage(fauxText("[silent]"));
+		},
+		(context) => {
+			seen.push(userTexts(context));
+			return fauxAssistantMessage(fauxText("You're welcome."));
+		},
+	]);
+	const job = nano.conversation.inject("check the delivery status; reply [silent] if nothing changed");
+	await wait(300);
+	nano.say("thanks for earlier");
+	assert.equal(await nano.next(), "You're welcome.", "the owner's text is answered even though the job was [silent]");
+	await job;
+	assert.doesNotMatch(seen[0] ?? "", /thanks for earlier/, "the job never saw the owner's text");
+	assert.match(seen[1] ?? "", /thanks for earlier/);
+	await nano.conversation.dispose();
+});
