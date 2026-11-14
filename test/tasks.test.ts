@@ -229,3 +229,24 @@ test("a failing turn does not block the queue", async () => {
 	}
 	assert.deepEqual(seen, ["boom", "after"]);
 });
+
+test("pushNext runs ahead of other sources but keeps its own source's order", async () => {
+	const turns: string[][] = [];
+	let release = () => {};
+	const queue = new TurnQueue<{ from: string; text: string }>(async (batch) => {
+		turns.push(batch.map((b) => `${b.from}:${b.text}`));
+		if (turns.length === 1) await new Promise<void>((r) => (release = r));
+	});
+	const done = [
+		queue.push({ from: "owner", text: "hi" }),
+		queue.push({ from: "system", text: "reminder" }),
+		// An owner text already waiting behind the reminder keeps its place ahead of newer ones.
+		queue.push({ from: "owner", text: "second" }),
+		queue.pushNext({ from: "owner", text: "third" }),
+		queue.pushNext({ from: "owner", text: "fourth" }),
+	];
+	await tick();
+	release();
+	await Promise.all(done);
+	assert.deepEqual(turns, [["owner:hi"], ["owner:second", "owner:third", "owner:fourth"], ["system:reminder"]]);
+});

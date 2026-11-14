@@ -2,6 +2,8 @@ import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
+export const INBOUND_MODES = ["interrupt", "steer", "queue"] as const;
+
 export interface Config {
 	channel: "photon" | "stdin";
 	photonProjectId: string;
@@ -15,6 +17,12 @@ export interface Config {
 	thinking: "off" | "minimal" | "low" | "medium" | "high";
 	/** Hours of silence after which the next message starts a fresh context window. */
 	idleHours: number;
+	/**
+	 * What an owner message does when a turn is already running: "interrupt" cancels a reply still
+	 * being written and answers both, otherwise steers; "steer" only joins at the next model call;
+	 * "queue" waits for a turn of its own.
+	 */
+	inbound: (typeof INBOUND_MODES)[number];
 	dataDir: string;
 	kbDir: string;
 	profileDir: string;
@@ -78,6 +86,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
 		modelId: rest.join("/"),
 		thinking,
 		idleHours: Number(env.NANO_IDLE_HOURS ?? 4),
+		inbound: (env.NANO_INBOUND?.trim().toLowerCase() || "interrupt") as Config["inbound"],
 		dataDir,
 		kbDir: resolve(env.NANO_KB_DIR ?? join(dataDir, "kb")),
 		profileDir: resolve(env.NANO_PROFILE_DIR ?? join(dataDir, "profile")),
@@ -95,6 +104,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
 	if (Boolean(env.NANO_LOCAL_MODEL?.trim()) !== Boolean(env.NANO_LOCAL_BASE_URL?.trim())) {
 		problems.push("NANO_LOCAL_MODEL and NANO_LOCAL_BASE_URL must be set together");
 	}
+	if (!INBOUND_MODES.includes(config.inbound)) problems.push(`NANO_INBOUND must be one of: ${INBOUND_MODES.join(", ")}`);
 	if (config.local && !(config.local.contextWindow > 0)) problems.push("NANO_LOCAL_CONTEXT must be a number of tokens");
 	if (channel === "photon") {
 		if (!config.photonProjectId) problems.push("PHOTON_PROJECT_ID is not set");
