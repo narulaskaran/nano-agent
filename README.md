@@ -66,7 +66,7 @@ Two git-ignored directories hold everything that is yours, so **back up both**:
 
 ## Security
 
-- Nano has a shell and file tools inside the container, and it can read its own environment, so a model key in `.env` is visible to it. Use a dedicated key with a spend limit, or keep it in the [vault](packs/vault/README.md#providers-and-models--voice) instead, where the agent can use it but not read it.
+- Nano has a shell and file tools inside the container, and it can read its own environment, so a model key in `.env` is visible to it. Use a dedicated key with a spend limit, or keep it in the [vault](packs/vault/README.md#providers-and-models--voice).
 - Anyone in `NANO_ALLOWED_USERS` can drive the agent. List only yourself, or people you would hand a shell to.
 - The [vault pack](packs/vault/README.md) keeps website logins and API keys where the agent can use them but not read them.
 

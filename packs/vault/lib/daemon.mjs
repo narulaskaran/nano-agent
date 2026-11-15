@@ -136,7 +136,7 @@ function main() {
 	};
 	const portals = [];
 	if (!binds.length) {
-		console.error("nano-vault: no tailnet address found; portal not started. Set NANO_VAULT_BIND to an explicit address.");
+		console.error("nano-vault: no tailnet address found; portal not started. The container needs host networking (see packs/vault/README.md), or set NANO_VAULT_BIND to an address it has.");
 	}
 	for (const bind of binds) {
 		const host = createPortal({ ...portalOptions, bind });
@@ -213,7 +213,7 @@ function main() {
 			return data.entries.map(describe).join("\n");
 		}
 		if (name === "url") {
-			if (!portalAddress) return "vault: the portal is not listening. Set NANO_VAULT_BIND to a tailnet address.";
+			if (!portalAddress) return "vault: the portal is not listening. The container needs host networking (see packs/vault/README.md), or NANO_VAULT_BIND set to a tailnet address it has.";
 			let site = "";
 			for (let i = 0; i < rest.length; i++) if (rest[i] === "--add") site = rest[++i] ?? "";
 			if (!site) return `${portalAddress}/`;
