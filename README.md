@@ -13,6 +13,14 @@ A small personal agent you text over iMessage, built to be cloned and run as you
 
 You need a Linux or macOS host with Docker (Compose v2, about 4 GB of RAM for the container), a Photon project, and one model API key.
 
+**Fastest way:** paste this into a coding agent such as Claude Code, on the machine that will run Nano:
+
+```text
+Set up Nano for me: clone https://github.com/narulaskaran/nano-agent and follow "Setting Nano up for someone" in its AGENTS.md.
+```
+
+It fills in the settings it can and asks you to type your secrets into `.env` yourself, so they never pass through its chat. To do it by hand:
+
 1. **Photon**: sign up at [app.photon.codes](https://app.photon.codes), create a project, enable iMessage, register your phone number, and copy the project ID and secret from its settings.
 2. **Model key**: the default is DeepSeek (`DEEPSEEK_API_KEY`). Any other provider works; see [Configuration](#configuration).
 3. **Clone and configure**:
@@ -42,8 +50,6 @@ You need a Linux or macOS host with Docker (Compose v2, about 4 GB of RAM for th
 
 No reply? Look in the logs for `ignoring message from non-allowed sender` (the number differs from `NANO_ALLOWED_USERS`) or a model error (missing or wrong key).
 
-Handing the repo to a coding agent? [AGENTS.md](AGENTS.md) has the same procedure written for it.
-
 ## Run it
 
 ```bash
@@ -60,7 +66,7 @@ Two git-ignored directories hold everything that is yours, so **back up both**:
 
 ## Security
 
-- Nano has a shell and file tools inside the container, and it can read its own environment, so a model key in `.env` is visible to it. Use a dedicated key with a spend limit.
+- Nano has a shell and file tools inside the container, and it can read its own environment, so a model key in `.env` is visible to it. Use a dedicated key with a spend limit, or keep it in the [vault](packs/vault/README.md#providers-and-models--voice) instead, where the agent can use it but not read it.
 - Anyone in `NANO_ALLOWED_USERS` can drive the agent. List only yourself, or people you would hand a shell to.
 - The [vault pack](packs/vault/README.md) keeps website logins and API keys where the agent can use them but not read them.
 

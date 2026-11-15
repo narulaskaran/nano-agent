@@ -44,6 +44,14 @@ It binds to the explicit comma-separated addresses in `NANO_VAULT_BIND`, or else
 
 To enable LAN access too, list both interface addresses in `NANO_VAULT_BIND` and include both the tailnet range and your LAN subnet in `NANO_VAULT_ALLOW`. Wildcard interfaces remain refused. The first configured address is used in shared links. LAN HTTP traffic is unencrypted; use it only on a trusted network, or use HTTPS.
 
+The container needs the host's network to see a tailnet or LAN address. With the shipped `compose.yaml` it has neither, and the daemon logs `no tailnet address found; portal not started`. Add a git-ignored `compose.override.yaml` and run `docker compose up -d`:
+
+```yaml
+services:
+  nano:
+    network_mode: host
+```
+
 `vault url` prints the address for the agent to text the owner. `vault url --add example.com` pre-fills the site field. The owner opens it with Tailscale on.
 
 ## Providers and Models & voice

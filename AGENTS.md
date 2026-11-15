@@ -7,12 +7,11 @@ Instructions for coding agents working in this repository.
 Goal: a running `nano` container that answers the owner's iMessages.
 
 1. Check prerequisites: `docker --version` and `docker compose version` both work.
-2. `cp .env.example .env`, then collect the four required values from the person. Do not invent any of them.
+2. `cp .env.example .env`. Ask the person for their own phone number in E.164 form (for example `+15551234567`) and write it into `NANO_ALLOWED_USERS` yourself.
+3. The secrets go into `.env` by the person's own hand, never through this chat: tell them to open `.env` and fill in these lines, then wait for them to say they are done. Do not ask them to paste the values to you, and never print `.env` or commit it.
    - `PHOTON_PROJECT_ID` and `PHOTON_PROJECT_SECRET`: they sign up at https://app.photon.codes, create a project, enable iMessage, register their phone number, and copy the two values from project settings.
-   - `NANO_ALLOWED_USERS`: their own phone number in E.164 form (for example `+15551234567`).
-   - One model key. Default is `DEEPSEEK_API_KEY`. For another provider, set its key and change `NANO_MODEL` to `provider/model-id`.
-3. Write the values into `.env` yourself. Never print secret values back, and never commit `.env`.
-4. `docker compose build`, then `docker compose run --rm nano node /app/src/index.ts --check`. It must end with `nano: check ok`. If it reports a problem, fix exactly what it names.
+   - One model key. Default is `DEEPSEEK_API_KEY`. For another provider, they set its key instead and you change `NANO_MODEL` to `provider/model-id`.
+4. `docker compose build`, then `docker compose run --rm nano node /app/src/index.ts --check`. It must end with `nano: check ok`. It confirms the keys without you reading them. If it reports a problem, fix exactly what it names; a bad key means asking the person to correct that line.
 5. `docker compose up -d`, then `docker compose logs --tail 30 nano`. Expect `Spectrum started` and `nano: listening on photon`.
 6. Ask the person to text their Photon number. A reply within a minute means setup is done. The first conversation is an onboarding chat; nothing else needs configuring by hand.
 
