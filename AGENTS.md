@@ -7,12 +7,12 @@ Instructions for coding agents working in this repository.
 Goal: a running `nano` container that answers the owner's iMessages.
 
 1. Check prerequisites: `docker --version` and `docker compose version` both work.
-2. `cp .env.example .env`, then start `docker compose build` in the background (it does not read `.env`, and the first build is slow).
-3. In one message, ask the person for their own phone number in E.164 form (for example `+15551234567`) and which model provider they want, and have them type the secrets below into `.env` themselves. Never ask for secret values in chat, print `.env`, or commit it.
+2. `cp .env.example .env`, then start `docker compose build` in the background; it is slow and does not need `.env`. If `id -u` is not 1000, set `NANO_UID` and `NANO_GID` to `id -u` and `id -g`.
+3. In one message, ask for their phone number (E.164, for example `+15551234567`) and model provider, and have them type the secrets below into `.env` themselves. Never ask for secrets in chat, print `.env`, or commit it.
    - `PHOTON_PROJECT_ID` and `PHOTON_PROJECT_SECRET`: they sign up at https://app.photon.codes, create a project, enable iMessage, register their phone number, and copy the two values from project settings.
-   - One model key. Default is `DEEPSEEK_API_KEY`. For another provider, they set its key instead.
+   - One model key, `DEEPSEEK_API_KEY` by default, or the other provider's key.
 
-   Write the phone number into `NANO_ALLOWED_USERS` and, for a provider other than DeepSeek, `NANO_MODEL` as `provider/model-id`. Wait until they say the secrets are in.
+   Write the phone number into `NANO_ALLOWED_USERS`, and `NANO_MODEL` (`provider/model-id`) for a provider other than DeepSeek. Wait until they say the secrets are in.
 4. Once the build is done, `docker compose run --rm nano node /app/src/index.ts --check`. It must end with `nano: check ok`. If it reports a problem, fix exactly what it names; for a bad key, ask the person to fix that line.
 5. `docker compose up -d`, then `docker compose logs --tail 30 nano`. Expect `Spectrum started` and `nano: listening on photon`.
 6. Ask the person to text their Photon number. A reply within a minute means setup is done. The first conversation is an onboarding chat; nothing else needs configuring by hand.
@@ -52,8 +52,6 @@ templates/kb/   starter knowledge base for new installs
 data/           everything personal (git-ignored); vault/ holds credentials (git-ignored)
 ```
 
-Nothing in `data/` or `vault/` belongs in this repository.
-
 ## Packs
 
 A pack is a folder that adds one capability. `NANO_PACKS` lists the ones to load.
@@ -76,7 +74,7 @@ This is a public repository. Never commit personal information:
 - real names, email addresses, phone numbers, physical addresses
 - API keys, tokens, secrets, payment method or token IDs, card digits
 - non-localhost IP addresses, filesystem paths containing a username
-- anything from `data/` (sessions, logs, profile, knowledge base)
+- anything from `data/` or `vault/`
 
 Use placeholders instead: `Jane Doe`, `user@example.com`, `+15551234567`, `123 Main St, Anytown, ST 12345`, `pm_visa_xxxxxxxxxxxx`, `/home/user/`, and `<angle-bracket>` placeholders in command examples.
 
