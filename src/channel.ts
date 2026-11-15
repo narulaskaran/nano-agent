@@ -96,6 +96,92 @@ export async function sendFileContent(
 	return "attachment";
 }
 
+const MAX_QUOTE_CHARS = 600;
+
+/** The readable text of a message someone replied to, or "" when it has none (a photo, a stub the provider could not load). */
+function quotedText(content: any): string {
+	if (!content || typeof content !== "object") return "";
+	switch (content.type) {
+		case "text":
+			return content.text ?? "";
+		case "markdown":
+			return content.markdown ?? "";
+		case "richlink":
+			return content.url ?? "";
+		case "reply":
+		case "edit":
+		case "effect":
+			return quotedText(content.content);
+		case "group":
+			return (Array.isArray(content.items) ? content.items : [])
+				.map((item: any) => quotedText(item?.content ?? item))
+				.filter(Boolean)
+				.join("\n");
+		case "attachment":
+			return `[attachment: ${content.name ?? "file"}]`;
+		case "voice":
+			return "[voice memo]";
+		default:
+			return "";
+	}
+}
+
+/**
+ * Turns one inbound message's content into text and files for the agent.
+ *
+ * An inline reply (the owner long-presses a bubble and answers it) arrives as `reply` content wrapping the real
+ * message, so it is unwrapped, with the quoted bubble in front: "why did you do this?" means nothing without it.
+ */
+export async function normalizeInbound(
+	content: any,
+	out: { text: string[]; files: InboundFile[] },
+	saveBinary: (content: any) => Promise<InboundFile | undefined>,
+): Promise<void> {
+	if (!content || typeof content !== "object") return;
+	switch (content.type) {
+		case "text":
+			if (content.text) out.text.push(content.text);
+			break;
+		case "richlink":
+			if (content.url) out.text.push(content.url);
+			break;
+		case "attachment":
+		case "voice": {
+			try {
+				const file = await saveBinary(content);
+				if (file) out.files.push(file);
+				else out.text.push(`[attachment too large to receive: ${content.name ?? content.type}]`);
+			} catch (error) {
+				console.error("nano: failed to read attachment:", error);
+				out.text.push(`[attachment could not be read: ${content.name ?? content.type}]`);
+			}
+			break;
+		}
+		case "group":
+			for (const item of Array.isArray(content.items) ? content.items : []) {
+				await normalizeInbound(item?.content ?? item, out, saveBinary);
+			}
+			break;
+		case "reply": {
+			const inner = { text: [] as string[], files: [] as InboundFile[] };
+			await normalizeInbound(content.content, inner, saveBinary);
+			if (inner.text.length === 0 && inner.files.length === 0) break;
+			const quoted = quotedText(content.target?.content).replace(/\s+/g, " ").trim();
+			if (quoted) {
+				const who = content.target?.direction === "outbound" ? "your earlier message" : "an earlier message";
+				const clipped = quoted.length > MAX_QUOTE_CHARS ? `${quoted.slice(0, MAX_QUOTE_CHARS)}…` : quoted;
+				out.text.push(`[Replying inline to ${who}: "${clipped}"]`);
+			}
+			out.text.push(...inner.text);
+			out.files.push(...inner.files);
+			break;
+		}
+		default:
+			// reactions, read receipts, typing, edits: not conversation input for now
+			break;
+	}
+}
+
 function safeName(name: string): string {
 	return basename(name).replace(/[^A-Za-z0-9._-]+/g, "_").slice(0, 80) || "file";
 }
@@ -142,38 +228,6 @@ export async function createPhotonChannel(config: Config): Promise<Channel> {
 		return { path, name, mimeType, kind };
 	}
 
-	async function normalize(content: AnySpace, messageId: string, out: { text: string[]; files: InboundFile[] }) {
-		if (!content || typeof content !== "object") return;
-		switch (content.type) {
-			case "text":
-				if (content.text) out.text.push(content.text);
-				break;
-			case "richlink":
-				if (content.url) out.text.push(content.url);
-				break;
-			case "attachment":
-			case "voice": {
-				try {
-					const file = await saveBinary(content, messageId);
-					if (file) out.files.push(file);
-					else out.text.push(`[attachment too large to receive: ${content.name ?? content.type}]`);
-				} catch (error) {
-					console.error("nano: failed to read attachment:", error);
-					out.text.push(`[attachment could not be read: ${content.name ?? content.type}]`);
-				}
-				break;
-			}
-			case "group":
-				for (const item of Array.isArray(content.items) ? content.items : []) {
-					await normalize(item?.content ?? item, messageId, out);
-				}
-				break;
-			default:
-				// reactions, read receipts, typing, edits: not conversation input for now
-				break;
-		}
-	}
-
 	return {
 		async start(onMessage) {
 			let backoff = 1000;
@@ -198,7 +252,7 @@ export async function createPhotonChannel(config: Config): Promise<Channel> {
 						const spaceId = /^any;-;(\+\d{6,})$/.exec(rawSpaceId)?.[1] ?? rawSpaceId;
 						spaces.set(spaceId, space);
 						const out = { text: [] as string[], files: [] as InboundFile[] };
-						await normalize(message.content, messageId, out);
+						await normalizeInbound(message.content, out, (content) => saveBinary(content, messageId));
 						if (out.text.length === 0 && out.files.length === 0) continue;
 						void Promise.resolve(message.read?.()).catch(() => {});
 						onMessage({ spaceId, senderId, messageId, text: out.text.join("\n"), files: out.files });
