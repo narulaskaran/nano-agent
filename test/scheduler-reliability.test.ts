@@ -186,3 +186,10 @@ test("an unreadable schedule file is set aside, not silently wiped", () => {
 	assert.equal(scheduler.list().length, 0);
 	assert.ok(readdirSync(dataDir).some((name) => name.startsWith("schedule.json.corrupt-")));
 });
+
+test("a script job's output goes out with the job's name on top", async () => {
+	const { sent, scheduler, tick } = setup();
+	scheduler.add({ name: "Weekly summary", kind: "script", then: "send", body: "echo Weight is steady.", cron: "* * * * *", spaceId: "owner" });
+	await tick(MINUTE);
+	assert.deepEqual(sent, ["Weekly summary:\nWeight is steady."]);
+});

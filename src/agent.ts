@@ -2,7 +2,7 @@ import { appendFileSync, existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import type { AgentSession, ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
-import type { Channel, Inbound } from "./channel.ts";
+import { type Channel, clip, type Inbound } from "./channel.ts";
 import { type Config, currentTimezone, localStamp } from "./config.ts";
 import { readJsonFile, writeJsonFile } from "./json-store.ts";
 import { refreshProviderSettings } from "./provider-settings.ts";
@@ -160,16 +160,8 @@ interface RunState {
 	aborted: boolean;
 }
 
-/** How many scheduled sends the next turn is told about, and how much of each. */
+/** How many sends made before the session exists are kept for it. */
 const DELIVERED_KEEP = 5;
-const DELIVERED_QUOTE_CHARS = 600;
-
-/** Tells the agent what its scheduled jobs sent the owner since its last turn: it did not write them in this session. */
-export function deliveredNote(texts: string[]): string {
-	if (texts.length === 0) return "";
-	const lines = texts.map((text) => `- "${text.replace(/\s+/g, " ").trim()}"`).join("\n");
-	return `[Since your last turn, your scheduled jobs sent the owner these messages. You did not write them in this conversation; if the owner asks about one, it came from a scheduled job:\n${lines}]\n\n`;
-}
 
 export class Conversation {
 	private session?: AgentSession;
@@ -193,10 +185,7 @@ export class Conversation {
 	private rolloverAt?: number;
 	/** The turn in progress, if any. */
 	private run?: RunState;
-	/**
-	 * Texts sent by `deliver` (reminders, script output) since the last turn. The session never saw them, so the next
-	 * turn is told, or "why did you send that?" has no answer.
-	 */
+	/** Texts `deliver` sent before the session was started, for its first turn to record. */
 	private delivered: string[] = [];
 
 	constructor(
@@ -240,8 +229,19 @@ export class Conversation {
 	async deliver(text: string): Promise<void> {
 		await this.say(text, true);
 		if (isSilent(text)) return;
-		this.delivered.push(text.length > DELIVERED_QUOTE_CHARS ? `${text.slice(0, DELIVERED_QUOTE_CHARS)}…` : text);
-		if (this.delivered.length > DELIVERED_KEEP) this.delivered.splice(0, this.delivered.length - DELIVERED_KEEP);
+		if (this.session) await this.recordDelivered(this.session, text);
+		else this.delivered = [...this.delivered, text].slice(-DELIVERED_KEEP);
+	}
+
+	/**
+	 * Puts a text the agent did not write into its session history, where it was sent, so "why did you send that?" has
+	 * an answer. Pi holds it until a turn in progress ends. Not a reply, so it starts no turn.
+	 */
+	private async recordDelivered(session: AgentSession, text: string): Promise<void> {
+		const content = `[Sent to the owner outside this conversation (a scheduled job, reminder or notice), not written by you here: "${clip(text)}"]`;
+		await session
+			.sendCustomMessage({ customType: "nano-delivered", content, display: false }, { triggerTurn: false })
+			.catch((error) => console.error("nano: could not record a delivered message:", (error as Error)?.message ?? error));
 	}
 
 	async dispose(): Promise<void> {
@@ -308,11 +308,12 @@ export class Conversation {
 		void this.channel.typing(this.spaceId, true);
 		try {
 			const { session, carry } = await this.ensureSession();
-			// A new context window already carries them over in `carry`.
+			// Sent before the session existed. A new context window already carries them over in `carry`.
 			const delivered = this.delivered.splice(0);
+			if (!carry) for (const text of delivered) await this.recordDelivered(session, text);
 			const intro = carry
 				? `[New context window after a gap. The last messages before it, for continuity only:\n${carry}]\n\n`
-				: deliveredNote(delivered);
+				: "";
 			// Owner messages that arrived while the session was being set up join this prompt.
 			if (run.from === "owner" && this.config.inbound === "interrupt") batch = [...batch, ...this.queue.takeNext("owner")];
 			run.phase = "starting";

@@ -104,9 +104,10 @@ const ACTIONABLE_REACTIONS = new Set(["❓", "👎"]);
 /** Content that is never conversation input, so it is dropped without a note or a log line. */
 const SILENT_TYPES = new Set(["read", "typing"]);
 
-function contactName(content: any): string {
-	const name = content?.name;
-	return (name?.formatted || [name?.first, name?.last].filter(Boolean).join(" ") || content?.org?.name || "").trim();
+/** "[<label>]" or "[<label>: <the contact's name>]". */
+function contactLabel(label: string, content: any): string {
+	const name = (content?.name?.formatted || [content?.name?.first, content?.name?.last].filter(Boolean).join(" ") || content?.org?.name || "").trim();
+	return `[${label}${name ? `: ${name}` : ""}]`;
 }
 
 /** The readable text of a message someone replied or reacted to, or "" when it has none (a stub the provider could not load). */
@@ -120,8 +121,6 @@ function quotedText(content: any): string {
 		case "richlink":
 			return content.url ?? "";
 		case "reply":
-		case "edit":
-		case "effect":
 			return quotedText(content.content);
 		case "group":
 			return (Array.isArray(content.items) ? content.items : [])
@@ -133,7 +132,7 @@ function quotedText(content: any): string {
 		case "voice":
 			return "[voice memo]";
 		case "contact":
-			return `[contact card${contactName(content) ? `: ${contactName(content)}` : ""}]`;
+			return contactLabel("contact card", content);
 		case "app":
 			return "[iMessage app card]";
 		default:
@@ -141,10 +140,15 @@ function quotedText(content: any): string {
 	}
 }
 
+/** Text on one line, clipped to `max` characters. */
+export function clip(text: string, max = MAX_QUOTE_CHARS): string {
+	const line = text.replace(/\s+/g, " ").trim();
+	return line.length > max ? `${line.slice(0, max)}…` : line;
+}
+
 /** `quotedText` on one line, clipped, or "" when there is nothing to quote. */
 function quote(content: any): string {
-	const text = quotedText(content).replace(/\s+/g, " ").trim();
-	return text.length > MAX_QUOTE_CHARS ? `${text.slice(0, MAX_QUOTE_CHARS)}…` : text;
+	return clip(quotedText(content));
 }
 
 function whose(target: any): string {
@@ -153,7 +157,7 @@ function whose(target: any): string {
 
 /** A shared contact card as plain lines, so Nano can save or use it. */
 function describeContact(content: any): string {
-	const lines = [`[Shared a contact card${contactName(content) ? `: ${contactName(content)}` : ""}]`];
+	const lines = [contactLabel("Shared a contact card", content)];
 	const org = [content.org?.title, content.org?.name].filter(Boolean).join(", ");
 	if (org) lines.push(`Work: ${org}`);
 	for (const phone of content.phones ?? []) if (phone?.value) lines.push(`Phone${phone.type ? ` (${phone.type})` : ""}: ${phone.value}`);
@@ -170,14 +174,8 @@ function describeContact(content: any): string {
 
 /** A third-party iMessage app card (a reservation, an invite) as its caption and link. Its fields are lazy and may fail. */
 async function describeApp(content: any): Promise<string> {
-	const [url, layout] = await Promise.all([
-		Promise.resolve()
-			.then(() => (typeof content.url === "function" ? content.url() : content.url))
-			.catch(() => undefined),
-		Promise.resolve()
-			.then(() => (typeof content.layout === "function" ? content.layout() : content.layout))
-			.catch(() => undefined),
-	]);
+	const field = async (key: "url" | "layout") => (typeof content[key] === "function" ? content[key]() : content[key]);
+	const [url, layout] = await Promise.all([field("url").catch(() => undefined), field("layout").catch(() => undefined)]);
 	const caption = [layout?.caption, layout?.subcaption, layout?.trailingCaption, layout?.trailingSubcaption]
 		.filter(Boolean)
 		.join(" · ");
@@ -197,12 +195,8 @@ function unreadableLabel(content: any): string {
  *
  * Nothing the owner deliberately sends is dropped silently: content Nano cannot read becomes a note, so it can say so
  * instead of leaving the owner without an answer. The deliberate exceptions are read receipts, typing indicators, and
- * acknowledging tapbacks (👍 ❤️ 😂 ‼️), which would otherwise start a turn for a message that needs none.
- *
- * - An inline reply (long-press a bubble, answer it) arrives as `reply` content wrapping the real message. It is
- *   unwrapped, with the quoted bubble in front: "why did you do this?" means nothing without it.
- * - A ❓ or 👎 tapback on one of Nano's messages becomes a note with the message it was on, so Nano can clarify or fix it.
- * - Contact cards and iMessage app cards become their text: name and numbers, caption and link.
+ * acknowledging tapbacks (👍 ❤️ 😂 ‼️), which would otherwise start a turn for a message that needs none. Replies and
+ * reactions carry the message they point at, quoted: "why did you do this?" means nothing without it.
  */
 export async function normalizeInbound(
 	content: any,
@@ -213,9 +207,6 @@ export async function normalizeInbound(
 	switch (content.type) {
 		case "text":
 			if (content.text) out.text.push(content.text);
-			break;
-		case "markdown":
-			if (content.markdown) out.text.push(content.markdown);
 			break;
 		case "richlink":
 			if (content.url) out.text.push(content.url);

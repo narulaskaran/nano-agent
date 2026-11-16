@@ -1,25 +1,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { type InboundFile, normalizeInbound } from "../src/channel.ts";
-
-const noFiles = async () => undefined;
-
-/** Runs `fn` with console.error muted: unreadable content is logged. */
-async function quiet<T>(fn: () => Promise<T>): Promise<T> {
-	const original = console.error;
-	console.error = () => {};
-	try {
-		return await fn();
-	} finally {
-		console.error = original;
-	}
-}
-
-async function normalize(content: unknown, saveBinary: (content: any) => Promise<InboundFile | undefined> = noFiles) {
-	const out = { text: [] as string[], files: [] as InboundFile[] };
-	await normalizeInbound(content, out, saveBinary);
-	return out;
-}
+import type { InboundFile } from "../src/channel.ts";
+import { normalize } from "./helpers/inbound.ts";
+import { quiet } from "./helpers/quiet.ts";
 
 /** What the Photon adapter delivers when the owner answers a bubble inline. */
 function inlineReply(content: unknown, target: unknown) {
