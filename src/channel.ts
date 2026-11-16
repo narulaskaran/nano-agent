@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { basename, extname, join } from "node:path";
 import { createInterface } from "node:readline";
@@ -23,10 +24,67 @@ export interface SendFileOptions {
 	asVoice?: boolean;
 }
 
+/** Provider acceptance of one exact text send; this is not a handset delivery/read receipt. */
+export interface TextSendReceipt {
+	channel: "photon";
+	boundary: "provider-accepted";
+	messageId: string;
+	requestedSpaceId: string;
+	providerSpaceId: string;
+	textSha256: string;
+	acceptedAt: string;
+}
+
+/** Keep the durable attempt unresolved and reconcile externally; do not automatically resend. */
+export class SendOutcomeUnknownError extends Error {
+	readonly outcome = "unknown";
+	constructor(message: string, options?: ErrorOptions) {
+		super(message, options);
+		this.name = "SendOutcomeUnknownError";
+	}
+}
+
+/** A single provider call, with no retry. Callers must persist their attempt before invoking it. */
+export async function sendTextWithReceipt(
+	destination: { requestedSpaceId: string; providerSpaceId: string },
+	text: string,
+	send: () => Promise<unknown>,
+	now: () => Date = () => new Date(),
+): Promise<TextSendReceipt> {
+	const requestedSpaceId = destination?.requestedSpaceId;
+	const providerSpaceId = destination?.providerSpaceId;
+	if (typeof text !== "string" || !text.trim() ||
+		typeof requestedSpaceId !== "string" || !requestedSpaceId.trim() ||
+		typeof providerSpaceId !== "string" || !providerSpaceId.trim()) {
+		throw new Error("Non-empty text and resolved destination IDs are required before sending.");
+	}
+	const textSha256 = createHash("sha256").update(text, "utf8").digest("hex");
+	let response: unknown;
+	try {
+		response = await send();
+	} catch (cause) {
+		throw new SendOutcomeUnknownError("The send failed without a confirmed outcome; reconcile before retrying.", { cause });
+	}
+	const message = response as { id?: unknown; space?: { id?: unknown } } | undefined;
+	if (typeof message?.id !== "string" || !message.id.trim() || message.space?.id !== providerSpaceId) {
+		throw new SendOutcomeUnknownError("The send returned no matching provider receipt; reconcile before retrying.");
+	}
+	let acceptedAt: string;
+	try {
+		acceptedAt = now().toISOString();
+	} catch (cause) {
+		throw new SendOutcomeUnknownError("The send returned a receipt but its acceptance time could not be recorded; reconcile before retrying.", { cause });
+	}
+	return { channel: "photon", boundary: "provider-accepted", messageId: message.id,
+		requestedSpaceId, providerSpaceId, textSha256, acceptedAt };
+}
+
 export interface Channel {
 	/** Resolves when the channel stops. `onMessage` must not throw. */
 	start(onMessage: (message: Inbound) => void): Promise<void>;
 	send(spaceId: string, text: string): Promise<void>;
+	/** Optional: provider acceptance with IDs/hash. Errors may be ambiguous; callers own durable attempt/receipt state. */
+	sendWithReceipt?(spaceId: string, text: string): Promise<TextSendReceipt>;
 	/**
 	 * Audio files go out as native iMessage voice memos unless `asVoice` is false; `asVoice: true` insists on a
 	 * voice memo and fails if the file is not audio. Everything else is a plain attachment.
@@ -216,6 +274,11 @@ export async function createPhotonChannel(config: Config): Promise<Channel> {
 			const space = await resolveSpace(spaceId);
 			const builder = chooseFormat(body) === "markdown" ? core.markdown(body) : core.text(body);
 			await space.send(builder);
+		},
+		async sendWithReceipt(spaceId, body) {
+			const space = await resolveSpace(spaceId);
+			const builder = chooseFormat(body) === "markdown" ? core.markdown(body) : core.text(body);
+			return sendTextWithReceipt({ requestedSpaceId: spaceId, providerSpaceId: space.id }, body, () => space.send(builder));
 		},
 		async sendFile(spaceId, path, caption, options) {
 			const space = await resolveSpace(spaceId);
