@@ -98,7 +98,18 @@ export async function sendFileContent(
 
 const MAX_QUOTE_CHARS = 600;
 
-/** The readable text of a message someone replied to, or "" when it has none (a photo, a stub the provider could not load). */
+/** Tapbacks that ask Nano to act: the owner is confused by, or disagrees with, one of its messages. Others are acknowledgements. */
+const ACTIONABLE_REACTIONS = new Set(["❓", "👎"]);
+
+/** Content that is never conversation input, so it is dropped without a note or a log line. */
+const SILENT_TYPES = new Set(["read", "typing"]);
+
+function contactName(content: any): string {
+	const name = content?.name;
+	return (name?.formatted || [name?.first, name?.last].filter(Boolean).join(" ") || content?.org?.name || "").trim();
+}
+
+/** The readable text of a message someone replied or reacted to, or "" when it has none (a stub the provider could not load). */
 function quotedText(content: any): string {
 	if (!content || typeof content !== "object") return "";
 	switch (content.type) {
@@ -121,16 +132,77 @@ function quotedText(content: any): string {
 			return `[attachment: ${content.name ?? "file"}]`;
 		case "voice":
 			return "[voice memo]";
+		case "contact":
+			return `[contact card${contactName(content) ? `: ${contactName(content)}` : ""}]`;
+		case "app":
+			return "[iMessage app card]";
 		default:
 			return "";
 	}
 }
 
+/** `quotedText` on one line, clipped, or "" when there is nothing to quote. */
+function quote(content: any): string {
+	const text = quotedText(content).replace(/\s+/g, " ").trim();
+	return text.length > MAX_QUOTE_CHARS ? `${text.slice(0, MAX_QUOTE_CHARS)}…` : text;
+}
+
+function whose(target: any): string {
+	return target?.direction === "outbound" ? "your earlier message" : "an earlier message";
+}
+
+/** A shared contact card as plain lines, so Nano can save or use it. */
+function describeContact(content: any): string {
+	const lines = [`[Shared a contact card${contactName(content) ? `: ${contactName(content)}` : ""}]`];
+	const org = [content.org?.title, content.org?.name].filter(Boolean).join(", ");
+	if (org) lines.push(`Work: ${org}`);
+	for (const phone of content.phones ?? []) if (phone?.value) lines.push(`Phone${phone.type ? ` (${phone.type})` : ""}: ${phone.value}`);
+	for (const email of content.emails ?? []) if (email?.value) lines.push(`Email${email.type ? ` (${email.type})` : ""}: ${email.value}`);
+	for (const address of content.addresses ?? []) {
+		const line = [address?.street, address?.city, address?.region, address?.postalCode, address?.country].filter(Boolean).join(", ");
+		if (line) lines.push(`Address${address.type ? ` (${address.type})` : ""}: ${line}`);
+	}
+	for (const url of content.urls ?? []) if (url) lines.push(`Link: ${url}`);
+	if (content.birthday) lines.push(`Birthday: ${content.birthday}`);
+	if (content.note) lines.push(`Note: ${content.note}`);
+	return lines.join("\n");
+}
+
+/** A third-party iMessage app card (a reservation, an invite) as its caption and link. Its fields are lazy and may fail. */
+async function describeApp(content: any): Promise<string> {
+	const [url, layout] = await Promise.all([
+		Promise.resolve()
+			.then(() => (typeof content.url === "function" ? content.url() : content.url))
+			.catch(() => undefined),
+		Promise.resolve()
+			.then(() => (typeof content.layout === "function" ? content.layout() : content.layout))
+			.catch(() => undefined),
+	]);
+	const caption = [layout?.caption, layout?.subcaption, layout?.trailingCaption, layout?.trailingSubcaption]
+		.filter(Boolean)
+		.join(" · ");
+	const summary = layout?.summary && layout.summary !== layout?.caption ? layout.summary : "";
+	return [`[Shared an iMessage app card${caption ? `: ${caption}` : ""}]`, summary, url].filter(Boolean).join("\n");
+}
+
+/** What to call content Nano cannot read, for the note the owner's message turns into. */
+function unreadableLabel(content: any): string {
+	if (content.type === "custom") return "a message Nano cannot read here (a sticker, Digital Touch, or another iMessage-only kind)";
+	if (content.type === "poll") return "a poll, which Nano cannot read yet";
+	return `a "${content.type}" message, which Nano cannot read yet`;
+}
+
 /**
  * Turns one inbound message's content into text and files for the agent.
  *
- * An inline reply (the owner long-presses a bubble and answers it) arrives as `reply` content wrapping the real
- * message, so it is unwrapped, with the quoted bubble in front: "why did you do this?" means nothing without it.
+ * Nothing the owner deliberately sends is dropped silently: content Nano cannot read becomes a note, so it can say so
+ * instead of leaving the owner without an answer. The deliberate exceptions are read receipts, typing indicators, and
+ * acknowledging tapbacks (👍 ❤️ 😂 ‼️), which would otherwise start a turn for a message that needs none.
+ *
+ * - An inline reply (long-press a bubble, answer it) arrives as `reply` content wrapping the real message. It is
+ *   unwrapped, with the quoted bubble in front: "why did you do this?" means nothing without it.
+ * - A ❓ or 👎 tapback on one of Nano's messages becomes a note with the message it was on, so Nano can clarify or fix it.
+ * - Contact cards and iMessage app cards become their text: name and numbers, caption and link.
  */
 export async function normalizeInbound(
 	content: any,
@@ -141,6 +213,9 @@ export async function normalizeInbound(
 	switch (content.type) {
 		case "text":
 			if (content.text) out.text.push(content.text);
+			break;
+		case "markdown":
+			if (content.markdown) out.text.push(content.markdown);
 			break;
 		case "richlink":
 			if (content.url) out.text.push(content.url);
@@ -166,18 +241,29 @@ export async function normalizeInbound(
 			const inner = { text: [] as string[], files: [] as InboundFile[] };
 			await normalizeInbound(content.content, inner, saveBinary);
 			if (inner.text.length === 0 && inner.files.length === 0) break;
-			const quoted = quotedText(content.target?.content).replace(/\s+/g, " ").trim();
-			if (quoted) {
-				const who = content.target?.direction === "outbound" ? "your earlier message" : "an earlier message";
-				const clipped = quoted.length > MAX_QUOTE_CHARS ? `${quoted.slice(0, MAX_QUOTE_CHARS)}…` : quoted;
-				out.text.push(`[Replying inline to ${who}: "${clipped}"]`);
-			}
+			const quoted = quote(content.target?.content);
+			if (quoted) out.text.push(`[Replying inline to ${whose(content.target)}: "${quoted}"]`);
 			out.text.push(...inner.text);
 			out.files.push(...inner.files);
 			break;
 		}
+		case "reaction": {
+			// Only a nudge on Nano's own message asks for anything; a tapback on the owner's own bubble does not.
+			if (!ACTIONABLE_REACTIONS.has(content.emoji) || content.target?.direction !== "outbound") break;
+			const quoted = quote(content.target?.content);
+			out.text.push(`[Reacted ${content.emoji} to ${whose(content.target)}${quoted ? `: "${quoted}"` : ""}]`);
+			break;
+		}
+		case "contact":
+			out.text.push(describeContact(content));
+			break;
+		case "app":
+			out.text.push(await describeApp(content));
+			break;
 		default:
-			// reactions, read receipts, typing, edits: not conversation input for now
+			if (SILENT_TYPES.has(content.type)) break;
+			console.error(`nano: received unreadable "${content.type}" content; telling the agent`);
+			out.text.push(`[Sent ${unreadableLabel(content)}]`);
 			break;
 	}
 }
