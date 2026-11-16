@@ -22,7 +22,8 @@ If there is no reply: check the logs for `ignoring message from non-allowed send
 ## Working on the code
 
 - Node 24, TypeScript run directly with no build step. Use erasable syntax only (no enums, no parameter properties).
-- `npm run typecheck && npm test` must pass before you call a change done.
+- `npm run typecheck && npm test` must pass before you call a change done. CI (`.github/workflows/ci.yml`) runs both on every pull request, plus the personal-data scan from the pre-commit hook.
+- Dependabot opens weekly update pull requests and security fixes. Patch and minor updates merge on their own once CI passes; majors and the exact-pinned packages below wait for review.
 - Test conversation behaviour locally with `NANO_CHANNEL=stdin` and a throwaway `NANO_DATA_DIR`: `npm install --ignore-scripts`, then `NANO_CHANNEL=stdin NANO_DATA_DIR=/tmp/nano-dev DEEPSEEK_API_KEY=... npm start` and type messages on stdin.
 - Keep the runtime small. Prefer a skill (Markdown) over new runtime code when instructions are enough.
 - New capabilities are packs (see "Packs" below). A pack keeps everything it needs inside `packs/<name>/` and touches `src/` only when the runtime truly lacks a hook. Shipped packs must be useful to any owner; anything specific to one person belongs in `data/packs/`, outside the repository.

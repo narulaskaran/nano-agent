@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Pre-commit hook: scan staged files for PII
 # Bypass: SKIP_PII_CHECK=1 git commit ...
+# CI: PII_SCAN_RANGE="<base> HEAD" scans the files changed in that range, as committed at HEAD
 # See AGENTS.md for the PII policy
 
 set -euo pipefail
@@ -14,7 +15,15 @@ if [[ "${SKIP_PII_CHECK:-}" == "1" ]]; then
     exit 0
 fi
 
-STAGED=$(git diff --cached --name-only --diff-filter=ACM)
+if [[ -n "${PII_SCAN_RANGE:-}" ]]; then
+    # Word-split on purpose: the range is two revisions, "<base> HEAD".
+    # shellcheck disable=SC2086
+    STAGED=$(git diff --name-only --diff-filter=ACM $PII_SCAN_RANGE)
+    SOURCE="HEAD:"
+else
+    STAGED=$(git diff --cached --name-only --diff-filter=ACM)
+    SOURCE=":"
+fi
 if [[ -z "$STAGED" ]]; then
     exit 0
 fi
@@ -51,7 +60,7 @@ check_pattern() {
         fi
 
         local raw
-        raw=$(git show ":$file" 2>/dev/null || true)
+        raw=$(git show "$SOURCE$file" 2>/dev/null || true)
         if [[ -z "$raw" ]]; then
             continue
         fi
