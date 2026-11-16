@@ -1,0 +1,38 @@
+version: 2
+updates:
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+
+    groups:
+      # Pinned to exact versions on purpose: both ship breaking changes (see AGENTS.md).
+      # Their updates are grouped so they land together, and are never auto-merged.
+      spectrum:
+        patterns:
+          - "@spectrum-ts/*"
+
+      pi:
+        patterns:
+          - "@earendil-works/*"
+
+      dev-tooling:
+        dependency-type: development
+
+    ignore:
+      # Types track the Node 24 runtime (Dockerfile, engines); move them with it.
+      - dependency-name: "@types/node"
+        update-types:
+          - version-update:semver-major
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+
+    groups:
+      actions:
+        patterns:
+          - "*"
