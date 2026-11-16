@@ -160,6 +160,17 @@ interface RunState {
 	aborted: boolean;
 }
 
+/** How many scheduled sends the next turn is told about, and how much of each. */
+const DELIVERED_KEEP = 5;
+const DELIVERED_QUOTE_CHARS = 600;
+
+/** Tells the agent what its scheduled jobs sent the owner since its last turn: it did not write them in this session. */
+export function deliveredNote(texts: string[]): string {
+	if (texts.length === 0) return "";
+	const lines = texts.map((text) => `- "${text.replace(/\s+/g, " ").trim()}"`).join("\n");
+	return `[Since your last turn, your scheduled jobs sent the owner these messages. You did not write them in this conversation; if the owner asks about one, it came from a scheduled job:\n${lines}]\n\n`;
+}
+
 export class Conversation {
 	private session?: AgentSession;
 	private providerRevision?: string;
@@ -182,6 +193,11 @@ export class Conversation {
 	private rolloverAt?: number;
 	/** The turn in progress, if any. */
 	private run?: RunState;
+	/**
+	 * Texts sent by `deliver` (reminders, script output) since the last turn. The session never saw them, so the next
+	 * turn is told, or "why did you send that?" has no answer.
+	 */
+	private delivered: string[] = [];
 
 	constructor(
 		spaceId: string,
@@ -223,6 +239,9 @@ export class Conversation {
 	 */
 	async deliver(text: string): Promise<void> {
 		await this.say(text, true);
+		if (isSilent(text)) return;
+		this.delivered.push(text.length > DELIVERED_QUOTE_CHARS ? `${text.slice(0, DELIVERED_QUOTE_CHARS)}…` : text);
+		if (this.delivered.length > DELIVERED_KEEP) this.delivered.splice(0, this.delivered.length - DELIVERED_KEEP);
 	}
 
 	async dispose(): Promise<void> {
@@ -289,9 +308,11 @@ export class Conversation {
 		void this.channel.typing(this.spaceId, true);
 		try {
 			const { session, carry } = await this.ensureSession();
+			// A new context window already carries them over in `carry`.
+			const delivered = this.delivered.splice(0);
 			const intro = carry
 				? `[New context window after a gap. The last messages before it, for continuity only:\n${carry}]\n\n`
-				: "";
+				: deliveredNote(delivered);
 			// Owner messages that arrived while the session was being set up join this prompt.
 			if (run.from === "owner" && this.config.inbound === "interrupt") batch = [...batch, ...this.queue.takeNext("owner")];
 			run.phase = "starting";

@@ -453,7 +453,7 @@ export class Scheduler {
 				if (job.then === "task") {
 					await agent(`Scheduled check "${job.name}" produced this output. Decide what, if anything, the owner needs to hear; if nothing, reply exactly [silent]:\n${output}`);
 				} else {
-					await this.sink.send(job.spaceId, output);
+					await this.sink.send(job.spaceId, labelScriptOutput(job.name, output));
 				}
 			}
 		} catch (error) {
@@ -467,6 +467,16 @@ export class Scheduler {
 	private save(): void {
 		writeJsonFile(this.path, { jobs: this.jobs });
 	}
+}
+
+/**
+ * Script output goes out with the job's name on top. It is not written for the moment it lands, so without a label it
+ * reads as a reply to whatever the owner was just talking about. Output that already starts with the name is left alone.
+ */
+export function labelScriptOutput(name: string, output: string): string {
+	const label = name.trim();
+	if (!label || output.trimStart().toLowerCase().startsWith(label.toLowerCase())) return output;
+	return `${label}:\n${output}`;
 }
 
 /** A one-shot plain message: the one kind of job that is kept until it has been delivered. */
