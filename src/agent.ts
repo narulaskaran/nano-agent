@@ -2,7 +2,7 @@ import { appendFileSync, existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import type { AgentSession, ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
-import { type Channel, clip, type Inbound } from "./channel.ts";
+import { baseMessageId, type Channel, clip, type Inbound, type Revision } from "./channel.ts";
 import { type Config, currentTimezone, localStamp } from "./config.ts";
 import { readJsonFile, writeJsonFile } from "./json-store.ts";
 import { refreshProviderSettings } from "./provider-settings.ts";
@@ -209,6 +209,8 @@ export class Conversation {
 
 	/** Texts often arrive in bursts; wait a beat and handle them as one message. */
 	receive(message: Inbound): void {
+		// An edit or unsend of a text still waiting here changes that text; Nano never sees the old version.
+		if (message.revision && this.revisePending(message.revision)) return;
 		this.pending.push(message);
 		clearTimeout(this.timer);
 		this.timer = setTimeout(() => this.flushOwner(), BURST_MS);
@@ -252,6 +254,22 @@ export class Conversation {
 		await this.session?.extensionRunner.emit({ type: "session_shutdown", reason: "quit" }).catch(() => {});
 		this.session?.dispose();
 		this.session = undefined;
+	}
+
+	/** Applies an edit or unsend to its message if that is still in the burst window. False when it is not. */
+	private revisePending(revision: Revision): boolean {
+		const matches = (m: Inbound) => baseMessageId(m.messageId) === revision.targetId;
+		if (revision.kind === "unsend") {
+			const before = this.pending.length;
+			this.pending = this.pending.filter((m) => !matches(m));
+			if (this.pending.length === 0) clearTimeout(this.timer);
+			return this.pending.length < before;
+		}
+		// An edit changes the text part; a part carrying a file keeps it.
+		const index = this.pending.findIndex((m) => matches(m) && m.files.length === 0);
+		if (index < 0) return false;
+		this.pending[index] = { ...this.pending[index], text: revision.text };
+		return true;
 	}
 
 	private flushOwner(): void {
