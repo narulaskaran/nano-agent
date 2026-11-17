@@ -7,7 +7,7 @@ import { fileURLToPath } from "node:url";
 import { fauxAssistantMessage, fauxText } from "@earendil-works/pi-ai";
 import type { Inbound } from "../src/channel.ts";
 // @ts-expect-error plain .mjs script without types
-import { PATCHED_VERSION, patchSpectrumIMessage } from "../patches/spectrum-imessage-revisions.mjs";
+import { ANCHORS, PATCHED_VERSION, patchSpectrumIMessage } from "../patches/spectrum-imessage-revisions.mjs";
 import { normalize } from "./helpers/inbound.ts";
 import { scriptedConversation } from "./helpers/scripted-session.ts";
 
@@ -92,7 +92,10 @@ test("an edit after Nano answered reaches it as a note with the old and new text
 	await nano.conversation.dispose();
 });
 
-/** A throwaway node_modules: every package linked from the real one, except @spectrum-ts/imessage, which is a copy. */
+/**
+ * A throwaway node_modules: every package linked from the real one, except @spectrum-ts/imessage, which is a copy
+ * with the patch taken back out (an install with scripts has already applied it to the real one).
+ */
 function adapterCopy(): { nodeModules: string; index: string } {
 	const real = join(dirname(fileURLToPath(import.meta.resolve("@spectrum-ts/core"))), "..", "..", "..");
 	const nodeModules = join(mkdtempSync(join(tmpdir(), "nano-patch-")), "node_modules");
@@ -100,7 +103,11 @@ function adapterCopy(): { nodeModules: string; index: string } {
 	for (const name of readdirSync(real)) if (name !== "@spectrum-ts") symlinkSync(join(real, name), join(nodeModules, name));
 	symlinkSync(join(real, "@spectrum-ts", "core"), join(nodeModules, "@spectrum-ts", "core"));
 	cpSync(join(real, "@spectrum-ts", "imessage"), join(nodeModules, "@spectrum-ts", "imessage"), { recursive: true });
-	return { nodeModules, index: join(nodeModules, "@spectrum-ts", "imessage", "dist", "index.js") };
+	const index = join(nodeModules, "@spectrum-ts", "imessage", "dist", "index.js");
+	let source = readFileSync(index, "utf8");
+	for (const [anchor, replacement] of ANCHORS) source = source.replace(replacement, anchor);
+	writeFileSync(index, source);
+	return { nodeModules, index };
 }
 
 test("the adapter patch applies once, refuses other versions, and maps edits and unsends", async () => {

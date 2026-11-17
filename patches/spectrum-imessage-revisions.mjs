@@ -61,6 +61,12 @@ const DISPATCH = `	${MARKER}
 	}
 	streamLog.debug("message event consumed without mapping", {`;
 
+/** Each anchor in the adapter's dist/index.js and the text that replaces it. */
+export const ANCHORS = [
+	["const toMessageItem = async (client, event, phone, cursor, onInbound) => {", HELPER],
+	['\tstreamLog.debug("message event consumed without mapping", {', DISPATCH],
+];
+
 /** Applies the patch to the adapter under `nodeModules`. Returns "patched" or "already patched"; throws when it cannot. */
 export function patchSpectrumIMessage(nodeModules) {
 	const dir = join(nodeModules, "@spectrum-ts", "imessage");
@@ -74,11 +80,7 @@ export function patchSpectrumIMessage(nodeModules) {
 	const file = join(dir, "dist", "index.js");
 	let source = readFileSync(file, "utf8");
 	if (source.includes(MARKER)) return "already patched";
-	const anchors = [
-		["const toMessageItem = async (client, event, phone, cursor, onInbound) => {", HELPER],
-		['\tstreamLog.debug("message event consumed without mapping", {', DISPATCH],
-	];
-	for (const [anchor, replacement] of anchors) {
+	for (const [anchor, replacement] of ANCHORS) {
 		if (source.indexOf(anchor) < 0 || source.indexOf(anchor) !== source.lastIndexOf(anchor)) throw new Error(`@spectrum-ts/imessage: patch anchor not found exactly once: ${anchor.trim()}`);
 		source = source.replace(anchor, replacement);
 	}
