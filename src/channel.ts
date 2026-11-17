@@ -10,12 +10,28 @@ export interface InboundFile {
 	kind: "image" | "voice" | "file";
 }
 
+/**
+ * The owner edited or unsent a message they had already sent; `targetId` is that message's id. A conversation that
+ * has not handled the message yet revises it in place; otherwise `Inbound.text`, a note saying what changed, is
+ * handled like a new message.
+ */
+export type Revision = { kind: "edit"; targetId: string; text: string } | { kind: "unsend"; targetId: string };
+
 export interface Inbound {
 	spaceId: string;
 	senderId: string;
 	messageId: string;
 	text: string;
 	files: InboundFile[];
+	revision?: Revision;
+}
+
+/** What `normalizeInbound` makes of one message: its text still in parts. */
+export type NormalizedInbound = Pick<Inbound, "files" | "revision"> & { text: string[] };
+
+/** The id of the message a part belongs to: flattened multi-part messages give each part an id of `p:<index>/<id>`. */
+export function baseMessageId(id: string): string {
+	return id.replace(/^p:\d+\//, "");
 }
 
 export interface SendFileOptions {
@@ -196,14 +212,21 @@ function unreadableLabel(content: any): string {
  * Nothing the owner deliberately sends is dropped silently: content Nano cannot read becomes a note, so it can say so
  * instead of leaving the owner without an answer. The deliberate exceptions are read receipts, typing indicators, and
  * acknowledging tapbacks (👍 ❤️ 😂 ‼️), which would otherwise start a turn for a message that needs none. Replies and
- * reactions carry the message they point at, quoted: "why did you do this?" means nothing without it.
+ * reactions carry the message they point at, quoted: "why did you do this?" means nothing without it. Edits and
+ * unsends (delivered only through patches/spectrum-imessage-revisions.mjs) quote the old text and set `out.revision`.
  */
 export async function normalizeInbound(
 	content: any,
-	out: { text: string[]; files: InboundFile[] },
+	out: NormalizedInbound,
 	saveBinary: (content: any) => Promise<InboundFile | undefined>,
 ): Promise<void> {
 	if (!content || typeof content !== "object") return;
+	/** The content a reply or edit wraps, normalized on its own. */
+	const inner = async (): Promise<NormalizedInbound> => {
+		const result: NormalizedInbound = { text: [], files: [] };
+		await normalizeInbound(content.content, result, saveBinary);
+		return result;
+	};
 	switch (content.type) {
 		case "text":
 			if (content.text) out.text.push(content.text);
@@ -229,13 +252,29 @@ export async function normalizeInbound(
 			}
 			break;
 		case "reply": {
-			const inner = { text: [] as string[], files: [] as InboundFile[] };
-			await normalizeInbound(content.content, inner, saveBinary);
-			if (inner.text.length === 0 && inner.files.length === 0) break;
+			const reply = await inner();
+			if (reply.text.length === 0 && reply.files.length === 0) break;
 			const quoted = quote(content.target?.content);
 			if (quoted) out.text.push(`[Replying inline to ${whose(content.target)}: "${quoted}"]`);
-			out.text.push(...inner.text);
-			out.files.push(...inner.files);
+			out.text.push(...reply.text);
+			out.files.push(...reply.files);
+			break;
+		}
+		case "edit":
+		case "unsend": {
+			const targetId = baseMessageId(String(content.target?.id ?? ""));
+			if (!targetId) break;
+			// The adapter's copy of the message as it was before this change.
+			const was = quote(content.target?.content);
+			if (content.type === "unsend") {
+				out.text.push(`[Unsent an earlier message${was ? `: "${was}"` : ""}]`);
+				out.revision = { kind: "unsend", targetId };
+				break;
+			}
+			const text = (await inner()).text.join("\n");
+			if (!text) break;
+			out.text.push(`[Edited an earlier message${was ? ` (it said: "${was}")` : ""}. It now says:]`, text);
+			out.revision = { kind: "edit", targetId, text };
 			break;
 		}
 		case "reaction": {
@@ -328,11 +367,11 @@ export async function createPhotonChannel(config: Config): Promise<Channel> {
 						const rawSpaceId = String(space.id ?? message.space?.id ?? senderId);
 						const spaceId = /^any;-;(\+\d{6,})$/.exec(rawSpaceId)?.[1] ?? rawSpaceId;
 						spaces.set(spaceId, space);
-						const out = { text: [] as string[], files: [] as InboundFile[] };
+						const out: NormalizedInbound = { text: [], files: [] };
 						await normalizeInbound(message.content, out, (content) => saveBinary(content, messageId));
 						if (out.text.length === 0 && out.files.length === 0) continue;
 						void Promise.resolve(message.read?.()).catch(() => {});
-						onMessage({ spaceId, senderId, messageId, text: out.text.join("\n"), files: out.files });
+						onMessage({ spaceId, senderId, messageId, text: out.text.join("\n"), files: out.files, revision: out.revision });
 					}
 					if (!stopped) console.error("nano: inbound stream ended, re-subscribing");
 				} catch (error) {
