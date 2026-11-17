@@ -2,7 +2,7 @@ import { appendFileSync, existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import type { AgentSession, ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
-import type { Channel, Inbound } from "./channel.ts";
+import { type Channel, clip, type Inbound } from "./channel.ts";
 import { type Config, currentTimezone, localStamp } from "./config.ts";
 import { readJsonFile, writeJsonFile } from "./json-store.ts";
 import { refreshProviderSettings } from "./provider-settings.ts";
@@ -160,6 +160,9 @@ interface RunState {
 	aborted: boolean;
 }
 
+/** How many sends made before the session exists are kept for it. */
+const DELIVERED_KEEP = 5;
+
 export class Conversation {
 	private session?: AgentSession;
 	private providerRevision?: string;
@@ -182,6 +185,8 @@ export class Conversation {
 	private rolloverAt?: number;
 	/** The turn in progress, if any. */
 	private run?: RunState;
+	/** Texts `deliver` sent before the session was started, for its first turn to record. */
+	private delivered: string[] = [];
 
 	constructor(
 		spaceId: string,
@@ -223,6 +228,20 @@ export class Conversation {
 	 */
 	async deliver(text: string): Promise<void> {
 		await this.say(text, true);
+		if (isSilent(text)) return;
+		if (this.session) await this.recordDelivered(this.session, text);
+		else this.delivered = [...this.delivered, text].slice(-DELIVERED_KEEP);
+	}
+
+	/**
+	 * Puts a text the agent did not write into its session history, where it was sent, so "why did you send that?" has
+	 * an answer. Pi holds it until a turn in progress ends. Not a reply, so it starts no turn.
+	 */
+	private async recordDelivered(session: AgentSession, text: string): Promise<void> {
+		const content = `[Sent to the owner outside this conversation (a scheduled job, reminder or notice), not written by you here: "${clip(text)}"]`;
+		await session
+			.sendCustomMessage({ customType: "nano-delivered", content, display: false }, { triggerTurn: false })
+			.catch((error) => console.error("nano: could not record a delivered message:", (error as Error)?.message ?? error));
 	}
 
 	async dispose(): Promise<void> {
@@ -289,6 +308,9 @@ export class Conversation {
 		void this.channel.typing(this.spaceId, true);
 		try {
 			const { session, carry } = await this.ensureSession();
+			// Sent before the session existed. A new context window already carries them over in `carry`.
+			const delivered = this.delivered.splice(0);
+			if (!carry) for (const text of delivered) await this.recordDelivered(session, text);
 			const intro = carry
 				? `[New context window after a gap. The last messages before it, for continuity only:\n${carry}]\n\n`
 				: "";

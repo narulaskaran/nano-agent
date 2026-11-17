@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import * as core from "@spectrum-ts/core";
 import { audioMimeType, createStdinChannel, sendFileContent } from "../src/channel.ts";
+import { quiet } from "./helpers/quiet.ts";
 import { scriptedConversation } from "./helpers/scripted-session.ts";
 import { fauxAssistantMessage, fauxText, fauxToolCall } from "@earendil-works/pi-ai";
 
@@ -13,17 +14,6 @@ function file(name: string): string {
 	const path = join(dir, name);
 	writeFileSync(path, "not really media");
 	return path;
-}
-
-/** Runs `fn` with console.error muted: the fallback path logs why the voice send failed. */
-async function quiet<T>(fn: () => Promise<T>): Promise<T> {
-	const original = console.error;
-	console.error = () => {};
-	try {
-		return await fn();
-	} finally {
-		console.error = original;
-	}
 }
 
 /** A space that records what was sent, as the content the Photon adapter would receive. */
