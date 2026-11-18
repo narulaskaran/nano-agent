@@ -9,13 +9,13 @@ Goal: a running `nano` container that answers the owner's iMessages.
 1. Check prerequisites: `docker --version` and `docker compose version` both work.
 2. `cp .env.example .env`, then start `docker compose build` in the background; it is slow and does not need `.env`. If `id -u` is not 1000, set `NANO_UID` and `NANO_GID` to `id -u` and `id -g`.
 3. Ask for their phone number (E.164, for example `+15551234567`) and model provider (DeepSeek is the default). Write the number into `NANO_ALLOWED_USERS`, and `NANO_MODEL` (`provider/model-id`) for a provider other than DeepSeek.
-4. Walk them through each secret, one at a time: give them the link and the clicks, ask them to copy the value and tell you when it is on their clipboard, then run `scripts/set-key <NAME>`. It reads the clipboard, writes the line into `.env` and prints only the name and length; if it rejects the value (empty, not a key, the same as another key), have them copy it again. Never ask for a secret in chat, print or read `.env`, or commit it.
+4. Walk them through each secret, one at a time: give them the link and the clicks, and ask them to copy the value and tell you when it is on their clipboard. Then read the clipboard (`pbpaste` on macOS, `wl-paste` or `xclip -selection clipboard -o` on Linux, `powershell.exe Get-Clipboard` on WSL) and pipe it straight into that line of `.env`, trimmed and single-quoted (`NAME='value'`, so Compose does not expand `$`). The value must never appear in your output: confirm with the name and length only. If the clipboard is empty, has spaces, or matches a key already set, they copied the wrong thing; ask again. Never ask for a secret in chat, print or read `.env`, or commit it.
    - `PHOTON_PROJECT_ID` and `PHOTON_PROJECT_SECRET`: sign up at https://app.photon.codes, create a project, enable iMessage, register their phone number, and copy each value from the project's settings.
    - The model key: `DEEPSEEK_API_KEY` from https://platform.deepseek.com/api_keys, or the key named in `.env.example` for their provider, from that provider's API keys page. Suggest a dedicated key with a spend limit.
    - Optional `BRAVE_SEARCH_API_KEY` for web search, from https://brave.com/search/api. Offer it; skip it if they would rather not.
 
-   If `scripts/set-key` says there is no clipboard (you are on a remote host or a headless machine), ask them to run `scripts/set-key <NAME>` themselves in a terminal on that host and paste at its hidden prompt.
-5. Once the build is done, `docker compose run --rm nano node /app/src/index.ts --check`. It must end with `nano: check ok`. If it reports a problem, fix exactly what it names; for a bad key, have the person copy it again and rerun `scripts/set-key` for it.
+   With no clipboard to read (a remote or headless host), ask them to paste each value into `.env` themselves in an editor on that host.
+5. Once the build is done, `docker compose run --rm nano node /app/src/index.ts --check`. It must end with `nano: check ok`. If it reports a problem, fix exactly what it names; for a bad key, have the person copy it again and replace that line.
 6. `docker compose up -d`, then `docker compose logs --tail 30 nano`. Expect `Spectrum started` and `nano: listening on photon`.
 7. Ask the person to text their Photon number. A reply within a minute means setup is done. The first conversation is an onboarding chat; nothing else needs configuring by hand.
 
@@ -49,7 +49,6 @@ src/            the runtime (TypeScript, no build step)
   task-tools.ts delegate and task management tools
   prompt.ts     system prompt assembly
 bin/            commands on PATH (nano-local)
-scripts/        host-side helpers (set-key: clipboard to .env)
 prompts/        the standing prompt
 packs/<name>/   capabilities shipped with Nano
 templates/kb/   starter knowledge base for new installs

@@ -17,7 +17,7 @@ Paste this into a coding agent such as Claude Code, Codex or Cursor, running on 
 Set up Nano for me: clone https://github.com/narulaskaran/nano-agent and follow "Setting Nano up for someone" in its AGENTS.md. Walk me through getting each API key, one at a time.
 ```
 
-It checks Docker, starts the build, and walks you through each account and key with links. For every key you copy it in your browser and say so; the agent runs `scripts/set-key`, which moves your clipboard into `.env`. Keys never pass through the chat, and you never edit a file. On a remote host with no clipboard, it asks you to run `scripts/set-key NAME` yourself and paste at a hidden prompt.
+It checks Docker, starts the build, and walks you through each account and key with links. For every key you copy it in your browser and say so; the agent moves it from your clipboard into `.env`. Keys never pass through the chat, and you never edit a file. On a remote host with no clipboard, it asks you to paste them into `.env` yourself.
 
 You need a Linux or macOS host with Docker (Compose v2) and about 1 GB of free RAM, a [Photon](https://app.photon.codes) account, and one model API key.
 
@@ -32,15 +32,7 @@ You need a Linux or macOS host with Docker (Compose v2) and about 1 GB of free R
    cp .env.example .env
    ```
 
-   For each secret, copy it, then run its line. `scripts/set-key` writes your clipboard into `.env`, or asks with hidden input when there is no clipboard:
-
-   ```bash
-   scripts/set-key PHOTON_PROJECT_ID
-   scripts/set-key PHOTON_PROJECT_SECRET
-   scripts/set-key DEEPSEEK_API_KEY      # or your provider's key
-   ```
-
-   Then edit `.env` and set `NANO_ALLOWED_USERS` to your own number, such as `+15551234567`. If your host user is not uid 1000, also set `NANO_UID` and `NANO_GID` (`id -u`, `id -g`) so `./data` stays yours. Every other setting is documented in the file.
+   Edit `.env` and set `PHOTON_PROJECT_ID`, `PHOTON_PROJECT_SECRET`, `NANO_ALLOWED_USERS` (your own number, such as `+15551234567`) and your model key. If your host user is not uid 1000, also set `NANO_UID` and `NANO_GID` (`id -u`, `id -g`) so `./data` stays yours. Every other setting is documented in the file.
 4. **Build and check**. The first build is slow; it installs every pack's dependencies, including a browser.
 
    ```bash
