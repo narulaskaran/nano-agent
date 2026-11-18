@@ -1,0 +1,83 @@
+#!/usr/bin/env bash
+# Write one secret into .env without it appearing on screen, in shell history
+# or in a coding agent's chat.
+#
+#   scripts/set-key KEY            take the value from the clipboard, or ask
+#                                  for it with hidden input if there is none
+#   scripts/set-key KEY --prompt   always ask with hidden input
+#   scripts/set-key KEY --stdin    read the value from standard input
+#
+# Copy the key in your browser, then run this. It only ever prints the key
+# name and the value's length. Set NANO_ENV_FILE to write somewhere other
+# than the repository's .env.
+set -euo pipefail
+
+die() { printf 'set-key: %s\n' "$*" >&2; exit 1; }
+
+key=${1:-}
+mode=${2:-auto}
+[[ $key =~ ^[A-Z][A-Z0-9_]*$ ]] || die "usage: scripts/set-key KEY [--prompt|--stdin]"
+case $mode in auto | --prompt | --stdin) ;; *) die "unknown option: $mode" ;; esac
+
+root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+env_file=${NANO_ENV_FILE:-$root/.env}
+
+read_clipboard() {
+	if command -v pbpaste >/dev/null; then pbpaste
+	elif [[ -n ${WAYLAND_DISPLAY:-} ]] && command -v wl-paste >/dev/null; then wl-paste --no-newline
+	elif [[ -n ${DISPLAY:-} ]] && command -v xclip >/dev/null; then xclip -selection clipboard -o
+	elif [[ -n ${DISPLAY:-} ]] && command -v xsel >/dev/null; then xsel --clipboard --output
+	elif command -v powershell.exe >/dev/null; then powershell.exe -NoProfile -Command Get-Clipboard
+	else return 1
+	fi
+}
+
+read_hidden() {
+	[[ -t 0 ]] || die "no clipboard here (an SSH session?). Run 'scripts/set-key $key' yourself in a terminal on this machine and paste at the prompt."
+	read -rsp "Paste $key (input is hidden), then press Enter: " value
+	printf '\n' >&2
+	printf '%s' "$value"
+}
+
+case $mode in
+	--stdin) value=$(cat) ;;
+	--prompt) value=$(read_hidden) ;;
+	auto) value=$(read_clipboard 2>/dev/null) || value=$(read_hidden) ;;
+esac
+
+# Trim whitespace and line endings that come along with a copy.
+value=${value//$'\r'/}
+value=${value#"${value%%[![:space:]]*}"}
+value=${value%"${value##*[![:space:]]}"}
+
+[[ -n $value ]] || die "$key: the value is empty. Copy the key first, then run this again."
+[[ $value != *[[:space:]]* ]] || die "$key: the copied text contains spaces or line breaks, so it is not a key. Copy just the key and run this again."
+[[ $value != *"'"* ]] || die "$key: the value contains a single quote, which .env cannot hold here. Edit .env by hand for this one."
+
+umask 077
+if [[ ! -f $env_file ]]; then
+	[[ -f $root/.env.example ]] || die "no $env_file and no .env.example to start it from"
+	cp "$root/.env.example" "$env_file"
+fi
+
+# Copying the wrong thing (or forgetting to copy) usually leaves the previous key on the clipboard.
+other=$(KEY="$key" VALUE="$value" awk -F= '
+	$1 != ENVIRON["KEY"] && $1 ~ /^[A-Z][A-Z0-9_]*$/ {
+		v = substr($0, length($1) + 2); gsub(/^'\''|'\''$/, "", v)
+		if (v == ENVIRON["VALUE"]) { print $1; exit }
+	}' "$env_file")
+[[ -z $other ]] || die "$key: that value is already set as $other. Copy the $key value and run this again."
+
+# Single quotes stop Docker Compose from expanding any "\$" inside the value.
+tmp=$(mktemp "$env_file.XXXXXX")
+trap 'rm -f "$tmp"' EXIT
+KEY="$key" VALUE="$value" awk '
+	BEGIN { line = ENVIRON["KEY"] "='\''" ENVIRON["VALUE"] "'\''" }
+	!done && index($0, ENVIRON["KEY"] "=") == 1 { print line; done = 1; next }
+	{ print }
+	END { if (!done) print line }' "$env_file" >"$tmp"
+chmod 600 "$tmp"
+mv "$tmp" "$env_file"
+trap - EXIT
+
+printf '%s set in %s (%d characters).\n' "$key" "$env_file" "${#value}"

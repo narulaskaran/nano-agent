@@ -8,14 +8,16 @@ Goal: a running `nano` container that answers the owner's iMessages.
 
 1. Check prerequisites: `docker --version` and `docker compose version` both work.
 2. `cp .env.example .env`, then start `docker compose build` in the background; it is slow and does not need `.env`. If `id -u` is not 1000, set `NANO_UID` and `NANO_GID` to `id -u` and `id -g`.
-3. In one message, ask for their phone number (E.164, for example `+15551234567`) and model provider, and have them type the secrets below into `.env` themselves. Never ask for secrets in chat, print `.env`, or commit it.
-   - `PHOTON_PROJECT_ID` and `PHOTON_PROJECT_SECRET`: they sign up at https://app.photon.codes, create a project, enable iMessage, register their phone number, and copy the two values from project settings.
-   - One model key, `DEEPSEEK_API_KEY` by default, or the other provider's key.
+3. Ask for their phone number (E.164, for example `+15551234567`) and model provider (DeepSeek is the default). Write the number into `NANO_ALLOWED_USERS`, and `NANO_MODEL` (`provider/model-id`) for a provider other than DeepSeek.
+4. Walk them through each secret, one at a time: give them the link and the clicks, ask them to copy the value and tell you when it is on their clipboard, then run `scripts/set-key <NAME>`. It reads the clipboard, writes the line into `.env` and prints only the name and length; if it rejects the value (empty, not a key, the same as another key), have them copy it again. Never ask for a secret in chat, print or read `.env`, or commit it.
+   - `PHOTON_PROJECT_ID` and `PHOTON_PROJECT_SECRET`: sign up at https://app.photon.codes, create a project, enable iMessage, register their phone number, and copy each value from the project's settings.
+   - The model key: `DEEPSEEK_API_KEY` from https://platform.deepseek.com/api_keys, or the key named in `.env.example` for their provider, from that provider's API keys page. Suggest a dedicated key with a spend limit.
+   - Optional `BRAVE_SEARCH_API_KEY` for web search, from https://brave.com/search/api. Offer it; skip it if they would rather not.
 
-   Write the phone number into `NANO_ALLOWED_USERS`, and `NANO_MODEL` (`provider/model-id`) for a provider other than DeepSeek. Wait until they say the secrets are in.
-4. Once the build is done, `docker compose run --rm nano node /app/src/index.ts --check`. It must end with `nano: check ok`. If it reports a problem, fix exactly what it names; for a bad key, ask the person to fix that line.
-5. `docker compose up -d`, then `docker compose logs --tail 30 nano`. Expect `Spectrum started` and `nano: listening on photon`.
-6. Ask the person to text their Photon number. A reply within a minute means setup is done. The first conversation is an onboarding chat; nothing else needs configuring by hand.
+   If `scripts/set-key` says there is no clipboard (you are on a remote host or a headless machine), ask them to run `scripts/set-key <NAME>` themselves in a terminal on that host and paste at its hidden prompt.
+5. Once the build is done, `docker compose run --rm nano node /app/src/index.ts --check`. It must end with `nano: check ok`. If it reports a problem, fix exactly what it names; for a bad key, have the person copy it again and rerun `scripts/set-key` for it.
+6. `docker compose up -d`, then `docker compose logs --tail 30 nano`. Expect `Spectrum started` and `nano: listening on photon`.
+7. Ask the person to text their Photon number. A reply within a minute means setup is done. The first conversation is an onboarding chat; nothing else needs configuring by hand.
 
 If there is no reply: check the logs for `ignoring message from non-allowed sender` (the allow-listed number does not match the sending number) or a model error (bad or missing key).
 
@@ -47,6 +49,7 @@ src/            the runtime (TypeScript, no build step)
   task-tools.ts delegate and task management tools
   prompt.ts     system prompt assembly
 bin/            commands on PATH (nano-local)
+scripts/        host-side helpers (set-key: clipboard to .env)
 prompts/        the standing prompt
 packs/<name>/   capabilities shipped with Nano
 templates/kb/   starter knowledge base for new installs
