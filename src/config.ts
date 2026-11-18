@@ -73,7 +73,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
 	const dataDir = resolve(env.NANO_DATA_DIR ?? join(appDir, "data"));
 	const channel = env.NANO_CHANNEL === "stdin" ? "stdin" : "photon";
 	const allowedUsers = list(env.NANO_ALLOWED_USERS ?? env.PHOTON_ALLOWED_USERS);
-	const [modelProvider, ...rest] = (env.NANO_MODEL ?? "deepseek/deepseek-flash").split("/");
+	const [modelProvider, ...rest] = (env.NANO_MODEL ?? "openrouter/deepseek/deepseek-v4.1-flash").split("/");
 	const thinking = (env.NANO_THINKING ?? "low") as Config["thinking"];
 
 	const config: Config = {
@@ -82,7 +82,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
 		photonProjectSecret: env.PHOTON_PROJECT_SECRET ?? "",
 		allowedUsers,
 		owner: env.NANO_OWNER ?? env.PHOTON_HOME_CHANNEL ?? allowedUsers[0] ?? "",
-		modelProvider: modelProvider ?? "deepseek",
+		modelProvider: modelProvider ?? "openrouter",
 		modelId: rest.join("/"),
 		thinking,
 		idleHours: Number(env.NANO_IDLE_HOURS ?? 4),
