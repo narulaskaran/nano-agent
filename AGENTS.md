@@ -8,10 +8,10 @@ Goal: a running `nano` container that answers the owner's iMessages.
 
 1. Check prerequisites: `docker --version` and `docker compose version` both work.
 2. `cp .env.example .env`, then start `docker compose build` in the background; it is slow and does not need `.env`. If `id -u` is not 1000, set `NANO_UID` and `NANO_GID` to `id -u` and `id -g`.
-3. Ask for their phone number (E.164, for example `+15551234567`) and model provider (DeepSeek is the default). Write the number into `NANO_ALLOWED_USERS`, and `NANO_MODEL` (`provider/model-id`) for a provider other than DeepSeek.
+3. Ask for their phone number (E.164, for example `+15551234567`) and model provider (OpenRouter is the default). Write the number into `NANO_ALLOWED_USERS`, and `NANO_MODEL` (`provider/model-id`) for a provider other than OpenRouter.
 4. Walk them through each secret, one at a time: give them the link and the clicks, and ask them to copy the value and tell you when it is on their clipboard. Then move the clipboard straight into that line of `.env`, trimmed and single-quoted (`NAME='value'`, so Compose does not expand `$`). The value must never appear in your output: confirm with the name and length only. If the clipboard is empty, has spaces, or matches a key already set, they copied the wrong thing; ask again. Never ask for a secret in chat, print or read `.env`, or commit it.
    - `PHOTON_PROJECT_ID` and `PHOTON_PROJECT_SECRET`: sign up at https://app.photon.codes, create a project, enable iMessage, register their phone number, and copy each value from the project's settings.
-   - The model key: `DEEPSEEK_API_KEY` from https://platform.deepseek.com/api_keys, or the key named in `.env.example` for their provider, from that provider's API keys page. Suggest a dedicated key with a spend limit.
+   - The model key: `OPENROUTER_API_KEY` from https://openrouter.ai/settings/keys, or the key named in `.env.example` for their provider, from that provider's API keys page. Suggest a dedicated key with a spend limit.
    - Optional `BRAVE_SEARCH_API_KEY` for web search, from https://brave.com/search/api. Offer it; skip it if they would rather not.
 
    With no clipboard to read (a remote or headless host), ask them to paste each value into `.env` themselves in an editor on that host.
@@ -26,7 +26,7 @@ If there is no reply: check the logs for `ignoring message from non-allowed send
 - Node 24, TypeScript run directly with no build step. Use erasable syntax only (no enums, no parameter properties).
 - `npm run typecheck && npm test` must pass before you call a change done. CI (`.github/workflows/ci.yml`) runs both on every pull request, plus the personal-data scan from the pre-commit hook.
 - Dependabot opens weekly update pull requests and security fixes. Patch and minor updates merge on their own once CI passes; majors and the exact-pinned packages below wait for review.
-- Test conversation behaviour locally with `NANO_CHANNEL=stdin` and a throwaway `NANO_DATA_DIR`: `npm install --ignore-scripts`, then `NANO_CHANNEL=stdin NANO_DATA_DIR=/tmp/nano-dev DEEPSEEK_API_KEY=... npm start` and type messages on stdin.
+- Test conversation behaviour locally with `NANO_CHANNEL=stdin` and a throwaway `NANO_DATA_DIR`: `npm install --ignore-scripts`, then `NANO_CHANNEL=stdin NANO_DATA_DIR=/tmp/nano-dev OPENROUTER_API_KEY=... npm start` and type messages on stdin.
 - Keep the runtime small. Prefer a skill (Markdown) over new runtime code when instructions are enough.
 - New capabilities are packs (see "Packs" below). A pack keeps everything it needs inside `packs/<name>/` and touches `src/` only when the runtime truly lacks a hook. Shipped packs must be useful to any owner; anything specific to one person belongs in `data/packs/`, outside the repository.
 - `@spectrum-ts/*` and `@earendil-works/pi-*` are pinned to exact versions; both ship breaking changes. Read their type definitions in `node_modules` before changing calls into them.

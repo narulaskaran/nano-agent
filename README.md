@@ -24,7 +24,7 @@ You need a Linux or macOS host with Docker (Compose v2) and about 1 GB of free R
 ### Without an agent
 
 1. **Photon**: sign up at [app.photon.codes](https://app.photon.codes), create a project, enable iMessage, register your phone number, and copy the project ID and secret from its settings.
-2. **Model key**: the default is DeepSeek (`DEEPSEEK_API_KEY`). For another provider, set its key and `NANO_MODEL`.
+2. **Model key**: the default is OpenRouter (`OPENROUTER_API_KEY`). For another provider, set its key and `NANO_MODEL`.
 3. **Clone and configure**:
 
    ```bash
