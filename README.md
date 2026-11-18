@@ -9,17 +9,19 @@ A small personal agent you text over iMessage, built to be cloned and run as you
 - **Optional local model** for private or light work that should not reach the cloud model.
 - **Guided first run**: the first conversation asks your name, timezone and what you want help with.
 
-## Deploy
+## Quick start
 
-You need a Linux or macOS host with Docker (Compose v2, about 4 GB of RAM for the container), a Photon project, and one model API key.
-
-**Fastest way:** paste this into a coding agent such as Claude Code, on the machine that will run Nano:
+Paste this into a coding agent such as Claude Code, Codex or Cursor, running on the machine that will host Nano:
 
 ```text
-Set up Nano for me: clone https://github.com/narulaskaran/nano-agent and follow "Setting Nano up for someone" in its AGENTS.md.
+Set up Nano for me: clone https://github.com/narulaskaran/nano-agent and follow "Setting Nano up for someone" in its AGENTS.md. Walk me through getting each API key, one at a time.
 ```
 
-It asks you to type your secrets into `.env` yourself, so they never pass through its chat. To do it by hand:
+It checks Docker, starts the build, and walks you through each account and key with links. For every key you copy it in your browser and say so; the agent moves it from your clipboard into `.env`. Keys never pass through the chat, and you never edit a file. On a remote host with no clipboard, it asks you to paste them into `.env` yourself.
+
+You need a Linux or macOS host with Docker (Compose v2) and about 1 GB of free RAM, a [Photon](https://app.photon.codes) account, and one model API key.
+
+### Without an agent
 
 1. **Photon**: sign up at [app.photon.codes](https://app.photon.codes), create a project, enable iMessage, register your phone number, and copy the project ID and secret from its settings.
 2. **Model key**: the default is DeepSeek (`DEEPSEEK_API_KEY`). For another provider, set its key and `NANO_MODEL`.
