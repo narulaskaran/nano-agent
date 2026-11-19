@@ -40,6 +40,9 @@ jobs:
       - name: Test
         run: npm test
 
+      - name: Test webhook ingress
+        run: python3 -m unittest discover -s packs/webhooks -p 'test_*.py'
+
   pii-scan:
     name: pii-scan
     if: github.repository == 'narulaskaran/nano-agent'
