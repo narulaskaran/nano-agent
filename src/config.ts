@@ -15,6 +15,8 @@ export interface Config {
 	modelProvider: string;
 	modelId: string;
 	thinking: "off" | "minimal" | "low" | "medium" | "high";
+	/** OpenRouter upstream providers to try in order. Empty leaves routing to OpenRouter. */
+	openRouterProviders: string[];
 	/** Hours of silence after which the next message starts a fresh context window. */
 	idleHours: number;
 	/**
@@ -85,6 +87,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
 		modelProvider: modelProvider ?? "openrouter",
 		modelId: rest.join("/"),
 		thinking,
+		openRouterProviders: list(env.NANO_OPENROUTER_PROVIDERS),
 		idleHours: Number(env.NANO_IDLE_HOURS ?? 4),
 		inbound: (env.NANO_INBOUND?.trim().toLowerCase() || "interrupt") as Config["inbound"],
 		dataDir,

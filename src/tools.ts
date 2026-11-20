@@ -5,7 +5,7 @@ import { Type } from "typebox";
 import type { Channel } from "./channel.ts";
 import { type Config, currentTimezone } from "./config.ts";
 import { ask, askLocal, type ChatFn } from "./local.ts";
-import { chooseModel } from "./models.ts";
+import { chooseModel, getMainModel } from "./models.ts";
 import { cronMatches, type Job, parseLocalTime, type Scheduler } from "./scheduler.ts";
 import { workspaceDir } from "./session.ts";
 
@@ -34,7 +34,7 @@ const workspacePath = (config: Config, path: string) => (isAbsolute(path) ? path
 function mainChat(config: Config, modelRuntime: ModelRuntime): ChatFn {
 	return async (messages, extra, signal) => {
 		if (extra.response_format) return { status: 400, text: "constrained output not supported" };
-		const model = modelRuntime.getModel(config.modelProvider, config.modelId);
+		const model = getMainModel(config, modelRuntime);
 		if (!model) return { status: 404, text: "main model not found" };
 		const [system, ...rest] = messages;
 		const reply = await modelRuntime.completeSimple(
