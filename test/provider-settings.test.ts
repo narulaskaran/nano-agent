@@ -4,9 +4,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";
-import { loadConfig } from "../src/config.ts";
+import { loadConfig, MAX_OUTPUT_TOKENS } from "../src/config.ts";
 import { applyProviderSettings, type ProviderSettings } from "../src/provider-settings.ts";
-import { resolveModel } from "../src/models.ts";
+import { getMainModel, resolveModel } from "../src/models.ts";
 
 test("owner settings replace main, local and background independently and restore environment defaults", async () => {
 	const dir = mkdtempSync(join(tmpdir(), "nano-role-settings-"));
@@ -47,6 +47,27 @@ test("owner settings replace main, local and background independently and restor
 		assert.equal(config.modelId, "deepseek-flash");
 		assert.equal(config.local?.modelId, "original-local");
 		assert.equal(config.background, undefined);
+	} finally {
+		rmSync(dir, { recursive: true, force: true });
+	}
+});
+
+test("replies are capped so OpenRouter does not reserve a whole output allowance against a key limit", async () => {
+	const dir = mkdtempSync(join(tmpdir(), "nano-cap-"));
+	try {
+		const config = loadConfig({ NANO_CHANNEL: "stdin", NANO_DATA_DIR: dir, NANO_MODEL: "openrouter/deepseek/deepseek-v4.1-flash" });
+		const runtime = await ModelRuntime.create({ authPath: join(dir, "auth.json"), modelsPath: null, refreshOnCreate: false });
+		const catalog = runtime.getModel("openrouter", "deepseek/deepseek-v4.1-flash");
+		assert.ok(catalog && catalog.maxTokens > MAX_OUTPUT_TOKENS);
+		// Direct OpenRouter model.
+		assert.equal(getMainModel(config, runtime)?.maxTokens, MAX_OUTPUT_TOKENS);
+		assert.equal(resolveModel(config, runtime, "main", false).model.maxTokens, MAX_OUTPUT_TOKENS);
+		// Model assigned in the vault portal, taking its limits from the catalog.
+		applyProviderSettings(config, runtime, {
+			providers: [{ id: "or", capabilities: ["chat"], local: false, catalogProvider: "openrouter" }],
+			roles: { main: { provider: "or", model: "deepseek/deepseek-v4.1-flash", contextWindow: 1048576 } },
+		});
+		assert.equal(runtime.getModel("nano-vault-main", "deepseek/deepseek-v4.1-flash")?.maxTokens, MAX_OUTPUT_TOKENS);
 	} finally {
 		rmSync(dir, { recursive: true, force: true });
 	}

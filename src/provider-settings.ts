@@ -1,7 +1,7 @@
 import type { Model } from "@earendil-works/pi-ai";
 import { streamSimple } from "@earendil-works/pi-ai/api/openai-completions";
 import type { ModelRuntime } from "@earendil-works/pi-coding-agent";
-import type { Config } from "./config.ts";
+import { type Config, MAX_OUTPUT_TOKENS } from "./config.ts";
 import { providerFetch, providerSettingsAvailable, roleFetch } from "./provider-client.ts";
 
 interface Route {
@@ -79,7 +79,7 @@ export function applyProviderSettings(config: Config, runtime: ModelRuntime, set
 					thinkingLevelMap: source?.thinkingLevelMap,
 					input: source?.input ?? ["text", "image"],
 					contextWindow,
-					maxTokens: Math.min(source?.maxTokens ?? 8192, contextWindow),
+					maxTokens: Math.min(source?.maxTokens ?? 8192, contextWindow, MAX_OUTPUT_TOKENS),
 					cost: source?.cost ?? { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 					compat: source?.compat ?? { supportsDeveloperRole: false },
 				},
