@@ -2,7 +2,7 @@ import { join } from "node:path";
 import type { Api, Model } from "@earendil-works/pi-ai";
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { refreshProviderSettings } from "./provider-settings.ts";
-import type { Config } from "./config.ts";
+import { type Config, MAX_OUTPUT_TOKENS } from "./config.ts";
 
 /** Pi provider id under which `NANO_LOCAL_*` is registered. */
 export const LOCAL_PROVIDER = "nano-local";
@@ -24,10 +24,15 @@ export function withProviderOrder(config: Config, model: Model<Api>): Model<Api>
 	} as Model<Api>;
 }
 
-/** The main model, with provider routing applied. */
+/** The model with its reply ceiling lowered to MAX_OUTPUT_TOKENS. */
+export function capOutput(model: Model<Api>): Model<Api> {
+	return model.maxTokens > MAX_OUTPUT_TOKENS ? { ...model, maxTokens: MAX_OUTPUT_TOKENS } : model;
+}
+
+/** The main model, with provider routing and the reply ceiling applied. */
 export function getMainModel(config: Config, runtime: ModelRuntime): Model<Api> | undefined {
 	const model = runtime.getModel(config.modelProvider, config.modelId);
-	return model && withProviderOrder(config, model);
+	return model && capOutput(withProviderOrder(config, model));
 }
 
 export async function createModelRuntime(config: Config): Promise<ModelRuntime> {
@@ -90,6 +95,6 @@ export function resolveModel(
 		choice.use === "local" && config.local ? [config.local.vault ? "nano-vault-local" : LOCAL_PROVIDER, config.local.modelId] : [config.modelProvider, config.modelId];
 	const found = runtime.getModel(provider, id);
 	if (!found) throw new Error(`Unknown model ${provider}/${id}`);
-	const model = withProviderOrder(config, found);
+	const model = capOutput(withProviderOrder(config, found));
 	return { model, label: choice.use === "local" ? `local ${id}` : `${provider}/${id}`, note: choice.note };
 }
