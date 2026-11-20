@@ -13,6 +13,23 @@ export interface ProviderSettings {
 	providers: { id: string; local: boolean; capabilities: string[]; catalogProvider?: string }[];
 	roles: Partial<Record<"main" | "background" | "local", Route>>;
 }
+/**
+ * The vault daemon forwards only the request body, so the `x-session-id` header Pi sends is lost before
+ * it reaches OpenRouter. The same id in the body (`session_id`) keeps a run's requests on the provider
+ * that holds its prompt cache.
+ */
+export function withBodySessionId<T extends { sessionId?: string; onPayload?: (payload: unknown, model: never) => unknown }>(options: T | undefined, enabled: boolean): T | undefined {
+	if (!enabled || !options?.sessionId) return options;
+	const { sessionId, onPayload } = options;
+	return {
+		...options,
+		onPayload: async (payload: unknown, model: never) => {
+			const next = (await onPayload?.(payload, model)) ?? payload;
+			return next && typeof next === "object" && !Array.isArray(next) ? { ...next, session_id: sessionId.slice(0, 256) } : next;
+		},
+	};
+}
+
 const states = new WeakMap<Config, { signature: string; main: [string, string]; local: Config["local"] }>();
 
 /** Read metadata each turn. Endpoint and key selection remain inside the daemon. */
@@ -49,7 +66,11 @@ export function applyProviderSettings(config: Config, runtime: ModelRuntime, set
 			api: "openai-completions",
 			apiKey: "vault-proxy",
 			streamSimple: (model, context, options) =>
-				streamSimple(model as Model<"openai-completions">, context, { ...options, apiKey: "vault-proxy", fetch: roleFetch(role) }),
+				streamSimple(model as Model<"openai-completions">, context, {
+					...withBodySessionId(options, connection.catalogProvider === "openrouter"),
+					apiKey: "vault-proxy",
+					fetch: roleFetch(role),
+				}),
 			models: [
 				{
 					id: route.model,
