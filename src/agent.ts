@@ -5,6 +5,7 @@ import { Type } from "typebox";
 import { baseMessageId, type Channel, clip, type Inbound, type Revision } from "./channel.ts";
 import { type Config, currentTimezone, localStamp } from "./config.ts";
 import { readJsonFile, writeJsonFile } from "./json-store.ts";
+import { getMainModel } from "./models.ts";
 import { refreshProviderSettings } from "./provider-settings.ts";
 import { packExtensions } from "./packs.ts";
 import { buildSystemPrompt } from "./prompt.ts";
@@ -356,7 +357,7 @@ export class Conversation {
 
 	private async ensureSession(): Promise<{ session: AgentSession; carry: string }> {
 		await refreshProviderSettings(this.config, this.modelRuntime);
-		const selected = this.modelRuntime.getModel(this.config.modelProvider, this.config.modelId);
+		const selected = getMainModel(this.config, this.modelRuntime);
 		if (this.session && selected && (this.session.model?.id !== selected.id || this.session.model?.provider !== selected.provider || this.providerRevision !== this.config.providerRevision)) await this.session.setModel(selected);
 		this.providerRevision = this.config.providerRevision;
 		const cutoff = this.rolloverAt ?? (isIdle(this.state.lastActivity, this.config.idleHours) ? Date.now() : undefined);
@@ -366,7 +367,7 @@ export class Conversation {
 		if (this.session) await this.dispose();
 
 		const resume = !idle && this.state.sessionFile && existsSync(this.state.sessionFile) ? this.state.sessionFile : undefined;
-		const model = this.modelRuntime.getModel(this.config.modelProvider, this.config.modelId);
+		const model = getMainModel(this.config, this.modelRuntime);
 		if (!model) throw new Error(`Unknown model ${this.config.modelProvider}/${this.config.modelId}`);
 		const session = await createNanoSession({
 			config: this.config,
