@@ -60,28 +60,7 @@ Rules:
 ## Before adding a server
 - Only add servers the owner asked for. Running a server means running its code inside Nano's container with Nano's access.
 - Prefer a server's official package or URL. `npx -y` and `uvx` fetch the latest version on every start; that is fine for well-known servers.
-- Servers that use OAuth sign-in need a browser on the same machine (`pi mcp login`), which Nano does not have. Prefer a token-based setup for those, or tell the owner the server needs a sign-in from the host. `nano-mcp login <name>` prints a URL and waits; the owner can open it and paste the failed redirect URL back.
-
-## OAuth client name
-Pi registers an OAuth client under the name `pi`. Some servers only accept registrations from known client names. Their consent screen says this client is not supported and lists the names they accept.
-
-When the owner asked to connect that server:
-
-1. Set `oauth.clientName` to one of the names the screen lists. For a new server, `nano-mcp add` takes `--oauth-client-name`. For one already in the file, add the object and keep the other fields:
-
-```json
-{
-  "example": {
-    "url": "https://mcp.example.com/mcp",
-    "oauth": { "clientName": "Claude Code" }
-  }
-}
-```
-
-2. A client already registered keeps its old name until sign-out. Run `nano-mcp logout <name>`, then `nano-mcp login <name>`.
-3. Send only that registration name. Do not copy another application's client id or secret.
-
-The name is sent only when Pi registers a client. Setting `clientName` makes Pi register dynamically instead of using its client metadata document.
+- Servers that use OAuth sign-in need a browser on the same machine (`pi mcp login`), which Nano does not have. Prefer a token-based setup for those, or tell the owner the server needs a sign-in from the host.
 
 ## When a tool fails
 - `nano-mcp list` shows the connection error and recent stderr of a failing stdio server. Logs are in `$PI_CODING_AGENT_DIR/mcp.log`.
