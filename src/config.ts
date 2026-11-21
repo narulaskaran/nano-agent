@@ -25,6 +25,8 @@ export interface Config {
 	 * "queue" waits for a turn of its own.
 	 */
 	inbound: (typeof INBOUND_MODES)[number];
+	/** Tapback the owner's message while its turn runs (👀), so they can see Nano picked it up. Off by default. */
+	reactions: boolean;
 	dataDir: string;
 	kbDir: string;
 	profileDir: string;
@@ -90,6 +92,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
 		openRouterProviders: list(env.NANO_OPENROUTER_PROVIDERS),
 		idleHours: Number(env.NANO_IDLE_HOURS ?? 4),
 		inbound: (env.NANO_INBOUND?.trim().toLowerCase() || "interrupt") as Config["inbound"],
+		reactions: ["1", "true", "yes", "on"].includes(env.NANO_REACTIONS?.trim().toLowerCase() ?? ""),
 		dataDir,
 		kbDir: resolve(env.NANO_KB_DIR ?? join(dataDir, "kb")),
 		profileDir: resolve(env.NANO_PROFILE_DIR ?? join(dataDir, "profile")),

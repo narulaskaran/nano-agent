@@ -39,6 +39,12 @@ export interface SendFileOptions {
 	asVoice?: boolean;
 }
 
+/** A tapback Nano put on one of the owner's messages. */
+export interface Reaction {
+	/** Takes the tapback off again. */
+	remove(): Promise<void>;
+}
+
 export interface Channel {
 	/** Resolves when the channel stops. `onMessage` must not throw. */
 	start(onMessage: (message: Inbound) => void): Promise<void>;
@@ -49,6 +55,11 @@ export interface Channel {
 	 */
 	sendFile(spaceId: string, path: string, caption?: string, options?: SendFileOptions): Promise<void>;
 	typing(spaceId: string, on: boolean): Promise<void>;
+	/**
+	 * Tapbacks an inbound message (`messageId` as given in `Inbound`) with `emoji`. Resolves undefined when the
+	 * channel cannot, the message is no longer known, or the send fails: a tapback is polish, never an error.
+	 */
+	react?(spaceId: string, messageId: string, emoji: string): Promise<Reaction | undefined>;
 	stop(): Promise<void>;
 }
 
@@ -116,6 +127,9 @@ const MAX_QUOTE_CHARS = 600;
 
 /** Tapbacks that ask Nano to act: the owner is confused by, or disagrees with, one of its messages. Others are acknowledgements. */
 const ACTIONABLE_REACTIONS = new Set(["❓", "👎"]);
+
+/** Inbound content a tapback cannot sensibly target. */
+const NOT_REACTABLE = new Set(["reaction", "edit", "unsend"]);
 
 /** Content that is never conversation input, so it is dropped without a note or a log line. */
 const SILENT_TYPES = new Set(["read", "typing"]);
@@ -315,6 +329,8 @@ export async function createPhotonChannel(config: Config): Promise<Channel> {
 	type AnySpace = any;
 	const spaces = new Map<string, AnySpace>();
 	const seen = new Set<string>();
+	/** Recent inbound messages by id, so a reaction can target one. */
+	const recent = new Map<string, AnySpace>();
 	const allowed = new Set(config.allowedUsers);
 	let stopped = false;
 
@@ -357,6 +373,8 @@ export async function createPhotonChannel(config: Config): Promise<Channel> {
 						if (messageId) {
 							seen.add(messageId);
 							if (seen.size > 2000) seen.delete(seen.values().next().value as string);
+							recent.set(messageId, message);
+							if (recent.size > 200) recent.delete(recent.keys().next().value as string);
 						}
 						const senderId = String(message.sender?.id ?? "");
 						if (!allowed.has(senderId)) {
@@ -398,6 +416,18 @@ export async function createPhotonChannel(config: Config): Promise<Channel> {
 				await space.send(core.typing(on ? "start" : "stop"));
 			} catch {
 				// typing indicators are polish, never a failure
+			}
+		},
+		async react(_spaceId, messageId, emoji) {
+			try {
+				const target = recent.get(messageId);
+				// A tapback on an edit, an unsend or another tapback means nothing (Spectrum refuses the last outright).
+				if (!target || NOT_REACTABLE.has(target.content?.type)) return undefined;
+				const sent = await target.react(emoji);
+				return sent ? { remove: async () => void (await sent.unsend()) } : undefined;
+			} catch (error) {
+				console.error("nano: reaction failed:", (error as Error)?.message ?? error);
+				return undefined;
 			}
 		},
 		async stop() {
