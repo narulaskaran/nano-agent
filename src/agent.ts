@@ -2,7 +2,7 @@ import { appendFileSync, existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import type { AgentSession, ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
-import { baseMessageId, type Channel, clip, type Inbound, type Revision } from "./channel.ts";
+import { baseMessageId, type Channel, clip, type Inbound, type Reaction, type Revision } from "./channel.ts";
 import { type Config, currentTimezone, localStamp } from "./config.ts";
 import { readJsonFile, writeJsonFile } from "./json-store.ts";
 import { getMainModel } from "./models.ts";
@@ -29,6 +29,10 @@ interface SpaceState {
 
 const BURST_MS = 1200;
 const TYPING_REFRESH_MS = 25_000;
+/** Tapback on the owner's message while Nano works on it; taken off when the reply is out. */
+const WORKING_REACTION = "👀";
+/** Tapback left on the owner's message when the turn failed, so the miss is visible on the message itself. */
+const FAILED_REACTION = "‼️";
 const RECENT_KEEP = 12;
 const CARRY_CHARS = 3000;
 
@@ -140,7 +144,7 @@ export class TurnQueue<T extends { from: string }> {
 }
 
 type Work =
-	| { from: "owner"; spoken: string; images: { type: "image"; data: string; mimeType: string }[] }
+	| { from: "owner"; spoken: string; messageId: string; images: { type: "image"; data: string; mimeType: string }[] }
 	| { from: "system"; text: string; note: string };
 
 /** What the turn in progress is doing, so a new owner message knows whether it can still change it. */
@@ -159,6 +163,8 @@ interface RunState {
 	interrupted: boolean;
 	/** The cancel has been sent. */
 	aborted: boolean;
+	/** The turn ended in an error the owner was told about. */
+	failed: boolean;
 }
 
 /** How many sends made before the session exists are kept for it. */
@@ -286,7 +292,7 @@ export class Conversation {
 		if (isIdle(this.state.lastActivity, this.config.idleHours)) this.rolloverAt ??= Date.now();
 		this.record("owner", spoken);
 
-		const work: Work = { from: "owner", spoken, images };
+		const work: Work = { from: "owner", spoken, messageId: batch[batch.length - 1]?.messageId ?? "", images };
 		const run = this.run;
 		const streaming = run !== undefined && this.session?.isStreaming === true;
 		if (this.config.inbound === "interrupt" && run?.from === "owner") {
@@ -321,8 +327,11 @@ export class Conversation {
 	}
 
 	private async turn(batch: Work[]): Promise<void> {
-		const run: RunState = { from: batch[0]?.from ?? "system", phase: "setup", interrupted: false, aborted: false };
+		const run: RunState = { from: batch[0]?.from ?? "system", phase: "setup", interrupted: false, aborted: false, failed: false };
 		this.run = run;
+		const last = batch[batch.length - 1];
+		const reactTo = this.config.reactions && last?.from === "owner" ? last.messageId : "";
+		const reaction = reactTo ? this.channel.react?.(this.spaceId, reactTo, WORKING_REACTION).catch(() => undefined) : undefined;
 		const typing = setInterval(() => void this.channel.typing(this.spaceId, true), TYPING_REFRESH_MS);
 		void this.channel.typing(this.spaceId, true);
 		try {
@@ -345,8 +354,24 @@ export class Conversation {
 			this.run = undefined;
 			clearInterval(typing);
 			void this.channel.typing(this.spaceId, false);
+			void this.settleReaction(reaction, reactTo, run);
 			this.state.sessionFile = this.session?.sessionFile ?? this.state.sessionFile;
 			this.store.save();
+		}
+	}
+
+	/**
+	 * Takes the 👀 off when the turn ends, without holding the turn up. A reply is its own signal, and a turn cancelled
+	 * for a newer message hands over to that message's turn, so both leave nothing behind; a failed turn leaves ‼️.
+	 */
+	private async settleReaction(pending: Promise<Reaction | undefined> | undefined, messageId: string, run: RunState): Promise<void> {
+		const reaction = await pending;
+		if (!reaction) return;
+		try {
+			await reaction.remove();
+			if (run.failed) await this.channel.react?.(this.spaceId, messageId, FAILED_REACTION);
+		} catch (error) {
+			console.error("nano: could not clear reaction:", (error as Error)?.message ?? error);
 		}
 	}
 
@@ -405,7 +430,10 @@ export class Conversation {
 			if (run) run.phase = event.message.content.some((c) => c.type === "toolCall") ? "tools" : "done";
 			const { text, error } = assistantText(event.message);
 			if (text) void this.say(text);
-			else if (error) void this.say(`I hit an error talking to the model: ${error.slice(0, 200)}`);
+			else if (error) {
+					if (run) run.failed = true;
+					void this.say(`I hit an error talking to the model: ${error.slice(0, 200)}`);
+				}
 		});
 		this.session = session;
 		// Only what came before the gap: the message that ended it is the prompt itself.
@@ -433,6 +461,7 @@ export class Conversation {
 	private async fail(error: unknown): Promise<void> {
 		const reason = (error as Error)?.message ?? String(error);
 		console.error("nano: turn failed:", error);
+		if (this.run) this.run.failed = true;
 		await this.say(`Something went wrong on my side: ${reason.slice(0, 200)}`);
 	}
 
