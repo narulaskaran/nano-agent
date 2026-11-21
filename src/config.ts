@@ -7,7 +7,7 @@ import { fileURLToPath } from "node:url";
  * (almost a million tokens on some models), and OpenRouter reserves the worst-case cost of that against
  * the API key's remaining spend limit, answering 402 once the limit is within reach of that reserve.
  */
-export const MAX_OUTPUT_TOKENS = 32_768;
+export const MAX_OUTPUT_TOKENS = 65_536;
 
 export const INBOUND_MODES = ["interrupt", "steer", "queue"] as const;
 
