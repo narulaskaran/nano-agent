@@ -1,7 +1,7 @@
 import type { Model } from "@earendil-works/pi-ai";
 import { streamSimple } from "@earendil-works/pi-ai/api/openai-completions";
 import type { ModelRuntime } from "@earendil-works/pi-coding-agent";
-import type { Config } from "./config.ts";
+import { type Config, MAX_OUTPUT_TOKENS } from "./config.ts";
 import { providerFetch, providerSettingsAvailable, roleFetch } from "./provider-client.ts";
 
 interface Route {
@@ -13,6 +13,23 @@ export interface ProviderSettings {
 	providers: { id: string; local: boolean; capabilities: string[]; catalogProvider?: string }[];
 	roles: Partial<Record<"main" | "background" | "local", Route>>;
 }
+/**
+ * The vault daemon forwards only the request body, so the `x-session-id` header Pi sends is lost before
+ * it reaches OpenRouter. The same id in the body (`session_id`) keeps a run's requests on the provider
+ * that holds its prompt cache.
+ */
+export function withBodySessionId<T extends { sessionId?: string; onPayload?: (payload: unknown, model: never) => unknown }>(options: T | undefined, enabled: boolean): T | undefined {
+	if (!enabled || !options?.sessionId) return options;
+	const { sessionId, onPayload } = options;
+	return {
+		...options,
+		onPayload: async (payload: unknown, model: never) => {
+			const next = (await onPayload?.(payload, model)) ?? payload;
+			return next && typeof next === "object" && !Array.isArray(next) ? { ...next, session_id: sessionId.slice(0, 256) } : next;
+		},
+	};
+}
+
 const states = new WeakMap<Config, { signature: string; main: [string, string]; local: Config["local"] }>();
 
 /** Read metadata each turn. Endpoint and key selection remain inside the daemon. */
@@ -49,7 +66,11 @@ export function applyProviderSettings(config: Config, runtime: ModelRuntime, set
 			api: "openai-completions",
 			apiKey: "vault-proxy",
 			streamSimple: (model, context, options) =>
-				streamSimple(model as Model<"openai-completions">, context, { ...options, apiKey: "vault-proxy", fetch: roleFetch(role) }),
+				streamSimple(model as Model<"openai-completions">, context, {
+					...withBodySessionId(options, connection.catalogProvider === "openrouter"),
+					apiKey: "vault-proxy",
+					fetch: roleFetch(role),
+				}),
 			models: [
 				{
 					id: route.model,
@@ -58,7 +79,7 @@ export function applyProviderSettings(config: Config, runtime: ModelRuntime, set
 					thinkingLevelMap: source?.thinkingLevelMap,
 					input: source?.input ?? ["text", "image"],
 					contextWindow,
-					maxTokens: Math.min(source?.maxTokens ?? 8192, contextWindow),
+					maxTokens: Math.min(source?.maxTokens ?? 8192, contextWindow, MAX_OUTPUT_TOKENS),
 					cost: source?.cost ?? { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 					compat: source?.compat ?? { supportsDeveloperRole: false },
 				},

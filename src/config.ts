@@ -2,6 +2,13 @@ import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
+/**
+ * Ceiling on one reply, in tokens. Without it the request asks for the model's whole output allowance
+ * (almost a million tokens on some models), and OpenRouter reserves the worst-case cost of that against
+ * the API key's remaining spend limit, answering 402 once the limit is within reach of that reserve.
+ */
+export const MAX_OUTPUT_TOKENS = 65_536;
+
 export const INBOUND_MODES = ["interrupt", "steer", "queue"] as const;
 
 export interface Config {
