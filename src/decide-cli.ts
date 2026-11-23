@@ -5,8 +5,8 @@ import { parseArgs } from "node:util";
 import { buildQuestion, decide, type DecisionRequest, top } from "./decide.ts";
 
 const USAGE = `usage: nano-decide [options] "<question>" [file]
-Asks the decision model (Jev, through OpenRouter with zero data retention required) one question about
-a file or stdin and prints the answer. Not for private material: this is a cloud call (use nano-local).
+Asks the decision model one question about a file or stdin and prints the answer. Not for private
+material: the decision model may be a cloud service (use nano-local).
 
   (default)                 yes/no question; prints yes or no
   --yes TEXT --no TEXT      optional: what yes and no mean

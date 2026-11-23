@@ -240,8 +240,8 @@ export class Scheduler {
 		if (input.cron) cronMatches(input.cron, new Date(), currentTimezone(this.config)); // validates
 		if (input.gate) {
 			if (input.kind !== "script") throw new Error('a gate judges script output, so it needs kind "script"');
-			// The gate is a cloud decision; private material must not reach it.
-			if (input.private) throw new Error("a private job cannot have a gate: gate decisions are cloud calls");
+			// The decision model may be a cloud service; private material must not reach it.
+			if (input.private) throw new Error("a private job cannot have a gate: the decision model may be a cloud service");
 			validateGate(input.gate);
 		}
 		const job: Job = { ...input, id: randomBytes(3).toString("hex"), createdAt: Date.now() };

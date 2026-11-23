@@ -3,8 +3,8 @@ import { dirname } from "node:path";
 import { type Answer, decide, type DecisionRequest, top, type Transport } from "./decide.ts";
 
 /**
- * The inbound router: one decision per owner message, before any model turn, answering several
- * questions at once (decide.ts). Code acts on each answer only when it is confident; anything
+ * The inbound router: one decision from the decision model per owner message, before any model turn,
+ * answering several questions at once (decide.ts). Code acts on each answer only when it is confident; anything
  * unsure, slow or failed routes the message exactly as if there were no router.
  * - reply:    "none" means the message only closes the exchange (thanks, ok, a laugh); no model turn runs.
  * - effort:   "long" means multi-step work; the turn is told to hand it to a background worker.

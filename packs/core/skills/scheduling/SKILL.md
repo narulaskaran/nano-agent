@@ -29,7 +29,7 @@ When whether to speak is a judgement ("is this new docket entry a ruling or just
 2. Schedule it with kind `script` and `gate: {notify: "<what is worth telling the owner>"}`. Use `then: "send"` when the facts read fine as they are, or `then: "task"` with `background: true` when a reply needs writing or a little research.
 3. The gate drops output that does not match `notify`, and anything the job already told the owner. When it is unsure or the decision fails, the output goes through as if there were no gate.
 4. For a check whose misses would hurt, start with `gate.shadow: true` for a few runs: the agent still sees everything, and `<data>/gate.jsonl` shows whether gate and agent agreed. Drop `shadow` once they do.
-Not for private material: the gate is a cloud call. Private checks call `nano-local` in the script.
+Not for private material: the gate asks the decision model, which may be a cloud service. Private checks call `nano-local` in the script.
 A script check costs nothing when nothing changed. Prefer it over a recurring `task` whenever the check can be mechanical.
 
 ## Project heartbeat

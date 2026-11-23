@@ -10,7 +10,7 @@ import { scriptedConversation } from "./helpers/scripted-session.ts";
 type Labels = Partial<Record<"reply" | "effort" | "topic" | "depth" | "remember" | "skill" | "task", [string, number]>>;
 
 /** A fake decision model: answers per message text, defaulting to "needs a quick reply, same topic". */
-function fakeJev(byMessage: Record<string, Labels | "fail">) {
+function fakeDecisionModel(byMessage: Record<string, Labels | "fail">) {
 	const seen: { message: string; questions: string[] }[] = [];
 	const transport: Transport = async (body) => {
 		const request = JSON.parse(body) as { state: { message: string }; questions: Record<string, { criteria: Record<string, string> }> };
@@ -25,7 +25,7 @@ function fakeJev(byMessage: Record<string, Labels | "fail">) {
 			const others = Object.keys(q.criteria).filter((k) => k !== choice);
 			answers[id] = { type: "choice", choice, probabilities: { [choice]: p, ...Object.fromEntries(others.map((k) => [k, (1 - p) / others.length])) } };
 		}
-		return { status: 200, text: JSON.stringify({ model: "typesafe/jev-1.14", answers }) };
+		return { status: 200, text: JSON.stringify({ model: "fixture/decision-model", answers }) };
 	};
 	return { transport, seen };
 }
@@ -35,8 +35,8 @@ const text = (context: { messages: readonly unknown[] }) => JSON.stringify(conte
 const settle = () => new Promise((r) => setTimeout(r, 1800));
 
 test("a message that only closes the exchange gets no model turn, and the next turn knows it was said", async () => {
-	const jev = fakeJev({ "thanks!": { reply: ["none", 0.96] } });
-	const nano = await scriptedConversation({ packs: "core", decisionTransport: jev.transport });
+	const decider = fakeDecisionModel({ "thanks!": { reply: ["none", 0.96] } });
+	const nano = await scriptedConversation({ packs: "core", decisionTransport: decider.transport });
 	nano.script([() => fauxAssistantMessage(fauxText("Booked: Friday at 8."))]);
 	nano.say("book the table for friday");
 	assert.equal(await nano.next(), "Booked: Friday at 8.");
@@ -60,8 +60,8 @@ test("a message that only closes the exchange gets no model turn, and the next t
 });
 
 test("an unsure or failed decision gets a normal turn", async () => {
-	const jev = fakeJev({ ok: { reply: ["none", 0.7] }, "ok then": "fail" });
-	const nano = await scriptedConversation({ packs: "core", decisionTransport: jev.transport });
+	const decider = fakeDecisionModel({ ok: { reply: ["none", 0.7] }, "ok then": "fail" });
+	const nano = await scriptedConversation({ packs: "core", decisionTransport: decider.transport });
 	nano.script([() => fauxAssistantMessage(fauxText("Done."))]);
 	nano.say("ok");
 	assert.equal(await nano.next(), "Done.");
@@ -75,8 +75,8 @@ test("an unsure or failed decision gets a normal turn", async () => {
 });
 
 test("slow work reaches the turn with a note to delegate it", async () => {
-	const jev = fakeJev({ "compare the five best e-ink tablets": { effort: ["long", 0.92] } });
-	const nano = await scriptedConversation({ packs: "core", decisionTransport: jev.transport });
+	const decider = fakeDecisionModel({ "compare the five best e-ink tablets": { effort: ["long", 0.92] } });
+	const nano = await scriptedConversation({ packs: "core", decisionTransport: decider.transport });
 	nano.script([
 		(context) => {
 			assert.match(text(context), /Router: this looks like slow, multi-step work/);
@@ -89,8 +89,8 @@ test("slow work reaches the turn with a note to delegate it", async () => {
 });
 
 test("a new topic after a quiet spell starts a fresh context window; a quick change of subject does not", async () => {
-	const jev = fakeJev({ "what's the weather tomorrow": { topic: ["new", 0.95] }, "any good ramen near me": { topic: ["new", 0.95] } });
-	const nano = await scriptedConversation({ packs: "core", decisionTransport: jev.transport });
+	const decider = fakeDecisionModel({ "what's the weather tomorrow": { topic: ["new", 0.95] }, "any good ramen near me": { topic: ["new", 0.95] } });
+	const nano = await scriptedConversation({ packs: "core", decisionTransport: decider.transport });
 	nano.script([() => fauxAssistantMessage(fauxText("Booked: Friday at 8."))]);
 	nano.say("book the table for friday");
 	assert.equal(await nano.next(), "Booked: Friday at 8.");
@@ -144,12 +144,12 @@ test("the first message of a conversation is not asked about topic, and output i
 });
 
 test("a picked skill goes into the prompt once per session, and a simple message runs without thinking", async () => {
-	const jev = fakeJev({
+	const decider = fakeDecisionModel({
 		"remind me at 6 to call mom": { skill: ["scheduling", 0.93], depth: ["simple", 0.96] },
 		"and at 7 to call dad": { skill: ["scheduling", 0.93], depth: ["simple", 0.96] },
 		"should I refinance": { depth: ["simple", 0.6] },
 	});
-	const nano = await scriptedConversation({ packs: "core", decisionTransport: jev.transport, reasoning: true, env: { NANO_THINKING: "low" } });
+	const nano = await scriptedConversation({ packs: "core", decisionTransport: decider.transport, reasoning: true, env: { NANO_THINKING: "low" } });
 	const session = () => (nano.conversation as unknown as { session: { thinkingLevel: string } }).session;
 	nano.script([
 		(context) => {
@@ -188,8 +188,8 @@ test("a picked skill goes into the prompt once per session, and a simple message
 });
 
 test("a lasting fact gets a note to save it, and a message about a running task names the task", async () => {
-	const jev = fakeJev({ "I'm vegetarian now": { remember: ["yes", 0.93] }, "actually only look at ones under $300": { task: ["ab12", 0.9] } });
-	const nano = await scriptedConversation({ packs: "core", decisionTransport: jev.transport });
+	const decider = fakeDecisionModel({ "I'm vegetarian now": { remember: ["yes", 0.93] }, "actually only look at ones under $300": { task: ["ab12", 0.9] } });
+	const nano = await scriptedConversation({ packs: "core", decisionTransport: decider.transport });
 	(nano.conversation as unknown as { tasks: { active: () => unknown[] } }).tasks.active = () => [{ id: "ab12", title: "Research e-ink tablets" }];
 	nano.script([
 		(context) => {

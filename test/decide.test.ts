@@ -21,7 +21,7 @@ test("decide returns typed answers and logs probabilities but never the state", 
 		source: "test",
 		transport: async (body) => {
 			sent = JSON.parse(body);
-			return { status: 200, text: JSON.stringify({ model: "typesafe/jev-1.14", answers: { confirmed: answer }, usage: { input_tokens: 40, output_tokens: 0 } }) };
+			return { status: 200, text: JSON.stringify({ model: "fixture/decision-model", answers: { confirmed: answer }, usage: { input_tokens: 40, output_tokens: 0 } }) };
 		},
 	});
 	assert.deepEqual(sent, { state: request.state, questions: request.questions });
@@ -61,9 +61,7 @@ test("command-line options become one question", () => {
 	assert.throws(() => buildQuestion("?", { option: ["a"], level: ["b"] }), /not both/);
 });
 
-test("without the vault, decisions go straight to OpenRouter's System One API with ZDR required", async () => {
-	assert.equal(decisionTransport({}), undefined);
-	const transport = decisionTransport({ OPENROUTER_API_KEY: "fixture-key", NANO_DECIDE_MODEL: "typesafe/jev-1.13" });
+async function sentBy(transport: Transport | undefined) {
 	assert.ok(transport);
 	const original = globalThis.fetch;
 	let seen: { url: string; headers: Record<string, string>; body: Record<string, unknown> } | undefined;
@@ -76,9 +74,38 @@ test("without the vault, decisions go straight to OpenRouter's System One API wi
 	} finally {
 		globalThis.fetch = original;
 	}
-	assert.equal(seen?.url, "https://openrouter.ai/api/v1/systemone");
-	assert.equal(seen?.headers.authorization, "Bearer fixture-key");
-	assert.deepEqual(seen?.body, { model: "typesafe/jev-1.13", ...request, provider: { zdr: true, data_collection: "deny" } });
+	assert.ok(seen);
+	return seen;
+}
+const ZDR = { zdr: true, data_collection: "deny" };
+
+test("without the vault or a decision URL, decisions go to OpenRouter with the default model and ZDR required", async () => {
+	assert.equal(decisionTransport({}), undefined);
+	const seen = await sentBy(decisionTransport({ OPENROUTER_API_KEY: "fixture-key" }));
+	assert.equal(seen.url, "https://openrouter.ai/api/v1/systemone");
+	assert.equal(seen.headers.authorization, "Bearer fixture-key");
+	assert.deepEqual(seen.body, { model: "typesafe/jev-1.14", ...request, provider: ZDR });
+	const chosen = await sentBy(decisionTransport({ OPENROUTER_API_KEY: "fixture-key", NANO_DECIDE_MODEL: "typesafe/jev-1.13" }));
+	assert.equal(chosen.body.model, "typesafe/jev-1.13");
+});
+
+test("a decision URL sends the configured model without OpenRouter's routing field, and needs no key", async () => {
+	const env = { NANO_DECIDE_URL: "http://127.0.0.1:30000/v1/systemone", NANO_DECIDE_MODEL: "fixture/clef-flash", OPENROUTER_API_KEY: "fixture-key" };
+	const local = await sentBy(decisionTransport(env));
+	assert.equal(local.url, "http://127.0.0.1:30000/v1/systemone");
+	assert.equal(local.headers.authorization, undefined, "the OpenRouter key never goes to another endpoint");
+	assert.deepEqual(local.body, { model: "fixture/clef-flash", ...request });
+	const keyed = await sentBy(decisionTransport({ ...env, NANO_DECIDE_API_KEY: "fixture-decide-key" }));
+	assert.equal(keyed.headers.authorization, "Bearer fixture-decide-key");
+	assert.equal(decisionTransport({ NANO_DECIDE_URL: env.NANO_DECIDE_URL, OPENROUTER_API_KEY: "fixture-key" }), undefined, "a custom endpoint has no default model");
+});
+
+test("an OpenRouter decision URL still requires ZDR", async () => {
+	const seen = await sentBy(
+		decisionTransport({ NANO_DECIDE_URL: "https://openrouter.ai/api/v1/systemone", NANO_DECIDE_MODEL: "fixture/decider", OPENROUTER_API_KEY: "fixture-key" }),
+	);
+	assert.equal(seen.headers.authorization, "Bearer fixture-key");
+	assert.deepEqual(seen.body, { model: "fixture/decider", ...request, provider: ZDR });
 });
 
 test("nano-decide exits 2 when no decision model is configured and 64 without a question", () => {

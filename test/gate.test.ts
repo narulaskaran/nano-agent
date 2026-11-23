@@ -25,7 +25,7 @@ function setup(reply: { answer?: "notify" | "quiet"; p?: number; status?: number
 		const other = answer === "quiet" ? "notify" : "quiet";
 		return {
 			status: 200,
-			text: JSON.stringify({ model: "typesafe/jev-1.14", answers: { notify: { type: "choice", choice: answer, probabilities: { [answer]: p, [other]: 1 - p } } } }),
+			text: JSON.stringify({ model: "fixture/decision-model", answers: { notify: { type: "choice", choice: answer, probabilities: { [answer]: p, [other]: 1 - p } } } }),
 		};
 	};
 	const sink: JobSink = {

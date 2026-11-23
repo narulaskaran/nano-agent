@@ -9,6 +9,7 @@ import type { Channel } from "../../src/channel.ts";
 import { type Config, loadConfig } from "../../src/config.ts";
 import type { Transport } from "../../src/decide.ts";
 import { Scheduler } from "../../src/scheduler.ts";
+import { noDecisionModel } from "./no-decision-model.ts";
 
 /** Text of every tool result in a model request, newest last. */
 export function toolResults(context: { messages: readonly unknown[] }): string[] {
@@ -50,7 +51,7 @@ export async function scriptedConversation(options: { packs: string; env?: Recor
 		async typing() {},
 		async stop() {},
 	};
-	const scheduler = new Scheduler(config, { send: async () => {}, task: async () => {}, background: async () => {} });
+	const scheduler = new Scheduler(config, { send: async () => {}, task: async () => {}, background: async () => {} }, { decisionTransport: noDecisionModel });
 	const tasks = new TaskManager({
 		path: join(dataDir, "tasks.json"),
 		maxConcurrent: 1,

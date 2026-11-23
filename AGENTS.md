@@ -48,7 +48,7 @@ src/            the runtime (TypeScript, no build step)
   models.ts     model runtime, local model provider, main/local/private choice
   local.ts      one-shot local model calls (ask_local, nano-local)
   scheduler.ts  reminders, cron jobs, script monitors, outbox
-  decide.ts     typed decisions from Jev (nano-decide), with a log
+  decide.ts     typed decisions from the decision model (nano-decide), with a log
   gate.ts       the gate on scheduled script output
   router.ts     the decision made on each owner message before its turn
   packs.ts      pack loading

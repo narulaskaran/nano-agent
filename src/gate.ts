@@ -3,7 +3,7 @@ import { dirname } from "node:path";
 import { decide, type DecisionRequest, top, type Transport } from "./decide.ts";
 
 /**
- * The attention gate: a script job's output is a set of facts, and a decision model (decide.ts) answers
+ * The attention gate: a script job's output is a set of facts, and the decision model (decide.ts) answers
  * "is this worth telling the owner now?" before anything is sent or any agent runs. Code then follows the
  * answer. The gate fails open: an error or an unsure answer goes ahead exactly as an ungated job would,
  * so a broken gate can cost a message but never swallow one.
