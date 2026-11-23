@@ -32,6 +32,10 @@ export interface Config {
 	 * "queue" waits for a turn of its own.
 	 */
 	inbound: (typeof INBOUND_MODES)[number];
+	/** Route each owner message with a decision first (router.ts). Off when no decision model is configured. */
+	router: boolean;
+	/** The router may start a fresh context window for a new topic only after this many quiet minutes. */
+	topicIdleMinutes: number;
 	dataDir: string;
 	kbDir: string;
 	profileDir: string;
@@ -97,6 +101,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
 		openRouterProviders: list(env.NANO_OPENROUTER_PROVIDERS),
 		idleHours: Number(env.NANO_IDLE_HOURS ?? 4),
 		inbound: (env.NANO_INBOUND?.trim().toLowerCase() || "interrupt") as Config["inbound"],
+		router: !/^(off|0|false|no)$/i.test(env.NANO_ROUTER?.trim() ?? ""),
+		topicIdleMinutes: Math.max(0, Number(env.NANO_TOPIC_IDLE_MINUTES ?? 20)),
 		dataDir,
 		kbDir: resolve(env.NANO_KB_DIR ?? join(dataDir, "kb")),
 		profileDir: resolve(env.NANO_PROFILE_DIR ?? join(dataDir, "profile")),

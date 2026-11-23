@@ -7,6 +7,7 @@ import { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { Conversation, StateStore } from "../../src/agent.ts";
 import type { Channel } from "../../src/channel.ts";
 import { type Config, loadConfig } from "../../src/config.ts";
+import type { Transport } from "../../src/decide.ts";
 import { Scheduler } from "../../src/scheduler.ts";
 
 /** Text of every tool result in a model request, newest last. */
@@ -20,7 +21,7 @@ export function toolResults(context: { messages: readonly unknown[] }): string[]
  * A Nano conversation as the stdin channel runs it, with a scripted model instead of a real one.
  * Replies the agent sends are collected in `sent`; `next()` resolves with the next one.
  */
-export async function scriptedConversation(options: { packs: string; env?: Record<string, string>; dataDir?: string; tokensPerSecond?: number }) {
+export async function scriptedConversation(options: { packs: string; env?: Record<string, string>; dataDir?: string; tokensPerSecond?: number; decisionTransport?: Transport }) {
 	const dataDir = options.dataDir ?? mkdtempSync(join(tmpdir(), "nano-test-"));
 	const faux = fauxProvider({ provider: "faux", models: [{ id: "scripted" }], tokensPerSecond: options.tokensPerSecond });
 	const config: Config = loadConfig({
@@ -29,6 +30,8 @@ export async function scriptedConversation(options: { packs: string; env?: Recor
 		NANO_PACKS: options.packs,
 		NANO_MODEL: "faux/scripted",
 		NANO_THINKING: "off",
+		// The router runs only when a test gives it a decision transport.
+		NANO_ROUTER: options.decisionTransport ? "on" : "off",
 		...options.env,
 	});
 	const runtime = await ModelRuntime.create({ authPath: join(dataDir, "pi", "auth.json"), modelsPath: null, refreshOnCreate: false });
@@ -55,7 +58,7 @@ export async function scriptedConversation(options: { packs: string; env?: Recor
 		runner: async () => ({ text: "", files: [] }),
 		handBack: async () => {},
 	});
-	const conversation = new Conversation("stdin", config, channel, new StateStore(dataDir), runtime, scheduler, tasks);
+	const conversation = new Conversation("stdin", config, channel, new StateStore(dataDir), runtime, scheduler, tasks, { decisionTransport: options.decisionTransport });
 	return {
 		config,
 		dataDir,
