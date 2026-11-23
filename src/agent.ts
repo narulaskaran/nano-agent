@@ -10,9 +10,10 @@ import { getMainModel } from "./models.ts";
 import { refreshProviderSettings } from "./provider-settings.ts";
 import { packExtensions } from "./packs.ts";
 import { buildSystemPrompt } from "./prompt.ts";
-import { LONG_HINT, logRoute, route } from "./router.ts";
+import { LONG_HINT, logRoute, REMEMBER_HINT, route, skillBlock, taskHint } from "./router.ts";
 import type { Scheduler } from "./scheduler.ts";
 import { assistantText, createNanoSession } from "./session.ts";
+import { listSkills } from "./skills.ts";
 import { taskTools } from "./task-tools.ts";
 import { isSilent, type TaskManager } from "./tasks.ts";
 import { nanoTools } from "./tools.ts";
@@ -142,7 +143,17 @@ export class TurnQueue<T extends { from: string }> {
 }
 
 type Work =
-	| { from: "owner"; spoken: string; images: { type: "image"; data: string; mimeType: string }[]; hint?: string }
+	| {
+			from: "owner";
+			spoken: string;
+			images: { type: "image"; data: string; mimeType: string }[];
+			/** Router notes for the turn. */
+			hints?: string[];
+			/** A skill the router picked, put into the prompt unless this session already has it. */
+			skill?: { name: string; path: string };
+			/** The router judged this needs no extended thinking. */
+			simple?: boolean;
+	  }
 	| { from: "system"; text: string; note: string };
 
 /** What the turn in progress is doing, so a new owner message knows whether it can still change it. */
@@ -200,6 +211,8 @@ export class Conversation {
 	/** Owner messages are routed one at a time, in arrival order. */
 	private routing: Promise<void> = Promise.resolve();
 	private readonly router?: Transport;
+	/** Skills already put into this session's prompts by the router. */
+	private injectedSkills = new Set<string>();
 
 	constructor(
 		spaceId: string,
@@ -316,8 +329,10 @@ export class Conversation {
 	private async routeOwner(work: Work & { from: "owner" }, before: { recent: Turn[]; lastActivity: number }, hasFiles: boolean): Promise<void> {
 		if (!this.router || this.run || this.queue.busy) return this.dispatch(work);
 		const now = Date.now();
+		const running = this.tasks.active().map((t) => ({ id: t.id, title: t.title }));
+		const skills = listSkills(this.config);
 		const decision = await route(
-			{ message: work.spoken, recent: before.recent, now, running: this.tasks.active().map((t) => t.title) },
+			{ message: work.spoken, recent: before.recent, now, running, skills },
 			{ transport: this.router, logPath: join(this.config.dataDir, "decisions.jsonl") },
 		);
 		const actions: string[] = [];
@@ -331,9 +346,29 @@ export class Conversation {
 				this.rolloverAt = now;
 				actions.push("new-context");
 			}
+			const hints: string[] = [];
 			if (decision.long) {
-				work.hint = LONG_HINT;
+				hints.push(LONG_HINT);
 				actions.push("delegate-hint");
+			}
+			const task = decision.task ? running.find((t) => t.id === decision.task) : undefined;
+			if (task) {
+				hints.push(taskHint(task));
+				actions.push(`task:${task.id}`);
+			}
+			if (decision.remember) {
+				hints.push(REMEMBER_HINT);
+				actions.push("remember-hint");
+			}
+			if (hints.length) work.hints = hints;
+			const skill = decision.skill ? skills.find((s) => s.name === decision.skill) : undefined;
+			if (skill) {
+				work.skill = { name: skill.name, path: skill.path };
+				actions.push(`skill:${skill.name}`);
+			}
+			if (decision.simple && !hasFiles) {
+				work.simple = true;
+				actions.push("no-thinking");
 			}
 		}
 		logRoute(join(this.config.dataDir, "router.jsonl"), { answers: decision.answers, ms: decision.ms, actions, error: decision.error, busy: free ? undefined : true });
@@ -410,8 +445,17 @@ export class Conversation {
 			if (run.from === "owner" && this.config.inbound === "interrupt") batch = [...batch, ...this.queue.takeNext("owner")];
 			run.phase = "starting";
 			const images = batch.flatMap((w) => (w.from === "owner" ? w.images : []));
-			const body = batch.map((w) => (w.from === "owner" ? this.stamp(w.spoken) + (w.hint ? `\n[${w.hint}]` : "") : this.stamp(w.text, w.note))).join("\n\n");
-			await session.prompt(intro + body, images.length > 0 ? { images } : undefined);
+			const body = batch.map((w) => (w.from === "owner" ? this.stamp(w.spoken) + this.routerNotes(w) : this.stamp(w.text, w.note))).join("\n\n");
+			// Thinking is turned off only when every message in the turn was judged simple, and back on right after.
+			const owners = batch.filter((w) => w.from === "owner");
+			const thinking = session.thinkingLevel;
+			const quick = owners.length === batch.length && owners.every((w) => w.simple) && thinking !== "off";
+			if (quick) session.setThinkingLevel("off"); // this session only, never the saved default
+			try {
+				await session.prompt(intro + body, images.length > 0 ? { images } : undefined);
+			} finally {
+				if (quick) session.setThinkingLevel(thinking);
+			}
 		} catch (error) {
 			await this.fail(error);
 		} finally {
@@ -421,6 +465,20 @@ export class Conversation {
 			this.state.sessionFile = this.session?.sessionFile ?? this.state.sessionFile;
 			this.store.save();
 		}
+	}
+
+	/** The router's notes and picked skill for one owner message. A skill goes in once per session. */
+	private routerNotes(work: Work & { from: "owner" }): string {
+		const notes = [...(work.hints ?? [])];
+		if (work.skill && !this.injectedSkills.has(work.skill.name)) {
+			try {
+				notes.push(skillBlock(work.skill.name, readFileSync(work.skill.path, "utf8")));
+				this.injectedSkills.add(work.skill.name);
+			} catch (error) {
+				console.error(`nano: skill ${work.skill.name} not read:`, (error as Error)?.message ?? error);
+			}
+		}
+		return notes.map((n) => `\n[${n}]`).join("");
 	}
 
 	private stamp(body: string, note?: string): string {
@@ -481,6 +539,7 @@ export class Conversation {
 			else if (error) void this.say(`I hit an error talking to the model: ${error.slice(0, 200)}`);
 		});
 		this.session = session;
+		this.injectedSkills = new Set();
 		// Only what came before the gap: the message that ended it is the prompt itself.
 		const carry = resume ? "" : carryOver(this.state.recent.filter((turn) => cutoff === undefined || turn.at < cutoff));
 		console.error(`nano: ${resume ? "resumed" : "started"} session for ${this.spaceId.slice(-4)} (${session.sessionFile ?? "memory"})`);

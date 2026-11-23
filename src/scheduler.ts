@@ -7,6 +7,7 @@ import type { Transport } from "./decide.ts";
 import { type Gate, type GateSent, type GateVerdict, logGate, rememberSent, runGate, validateGate } from "./gate.ts";
 import { readJsonFile, writeJsonFile } from "./json-store.ts";
 import { isSilent } from "./tasks.ts";
+import { triageFailure } from "./triage.ts";
 
 /**
  * What a job does when it fires:
@@ -430,7 +431,24 @@ export class Scheduler {
 	private async failed(job: Job, error: string, now: number): Promise<void> {
 		const health = this.noteFailure(job, error, now);
 		if (health.escalated) return;
-		const lasting = !isTransient(error) || health.failures >= TRANSIENT_RUNS || now - (health.since ?? now) >= TRANSIENT_MS;
+		// A decision sorts the failure; when it is unsure or unavailable (or the job is private), the regex does.
+		const triage = job.private
+			? undefined
+			: await triageFailure({ name: job.name, kind: job.kind, error, source: `triage:${job.id}`, logPath: join(this.config.dataDir, "decisions.jsonl"), transport: this.options.decisionTransport });
+		if (triage) console.error(`nano: job ${job.id} (${job.name}) failure looks ${triage.kind} (${triage.p.toFixed(2)})`);
+		if (triage?.kind === "owner") {
+			// A repair cannot fix a login, a permission or money, so the owner hears now instead of after a wasted repair.
+			try {
+				await this.sink.send(job.spaceId, `"${job.name}" is failing and needs you: ${(health.lastError ?? "").slice(0, 200)}. I will stay quiet about it until it works again.`);
+				health.escalated = true;
+				this.save();
+			} catch {
+				// Not delivered: the next failure tries again.
+			}
+			return;
+		}
+		const transient = triage ? triage.kind === "transient" : isTransient(error);
+		const lasting = !transient || health.failures >= TRANSIENT_RUNS || now - (health.since ?? now) >= TRANSIENT_MS;
 		if (!lasting) return;
 		if (health.repairAt === undefined) {
 			health.repairAt = now;
