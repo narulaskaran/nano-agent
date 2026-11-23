@@ -66,6 +66,12 @@ Two git-ignored directories hold everything that is yours, so **back up both**:
 - `data/`: sessions, logs, profile, knowledge base, schedule state, and your own packs in `data/packs/`.
 - `vault/`: credentials, used only by the `vault` pack.
 
+### Customize Nano's voice
+
+Put lasting preferences for Nano's voice and personality in the optional `data/SOUL.md`, or text Nano something like “Use dry humor in casual chats and save that as my default.” Nano reads the file when it opens a new conversation session. An absent or empty file uses the default voice, and background workers use their own instructions.
+
+Deployment-specific operating instructions belong in `data/LOCAL.md`.
+
 ## Security
 
 - Nano has a shell inside the container and can read its own environment, so it can see any key in `.env`. Use a dedicated key with a spend limit.

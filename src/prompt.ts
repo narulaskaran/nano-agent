@@ -37,7 +37,12 @@ export function buildSystemPrompt(config: Config, worker?: { private: boolean })
 			.replaceAll("{{data}}", config.dataDir);
 
 	const parts = [fill(readFileSync(join(config.appDir, "prompts", "SYSTEM.md"), "utf8")).trim()];
-	if (worker) parts.push(worker.private ? `${WORKER}\n${PRIVATE_WORKER}` : WORKER);
+	if (worker) {
+		parts.push(worker.private ? `${WORKER}\n${PRIVATE_WORKER}` : WORKER);
+	} else {
+		const soul = readIfExists(join(config.dataDir, "SOUL.md"))?.trim();
+		if (soul) parts.push(`## Owner's voice preferences\n${soul}`);
+	}
 
 	// Deployment-specific notes that must not live in the public repo.
 	const local = readIfExists(join(config.dataDir, "LOCAL.md"));
