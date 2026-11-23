@@ -437,7 +437,7 @@ export class Scheduler {
 			: await triageFailure({ name: job.name, kind: job.kind, error, source: `triage:${job.id}`, logPath: join(this.config.dataDir, "decisions.jsonl"), transport: this.options.decisionTransport });
 		if (triage) console.error(`nano: job ${job.id} (${job.name}) failure looks ${triage.kind} (${triage.p.toFixed(2)})`);
 		if (triage?.kind === "owner") {
-			// A repair cannot fix a login, a permission or money, so the owner hears now instead of after a wasted repair.
+			// A repair cannot fix a login, an account or money, so the owner hears now instead of after a wasted repair.
 			try {
 				await this.sink.send(job.spaceId, `"${job.name}" is failing and needs you: ${(health.lastError ?? "").slice(0, 200)}. I will stay quiet about it until it works again.`);
 				health.escalated = true;
@@ -585,6 +585,7 @@ function repairPrompt(job: Job, dataDir: string): string {
 		"Try once to fix the cause. Read the script and the files it uses, find what broke, fix it, then run the command by hand to confirm it works.",
 		`You may fix the script, its state file or its inputs in the workspace. If the job's command itself is wrong, cancel job ${job.id} and add a corrected one with the same name, schedule and settings.`,
 		"You may not change credentials or anything in the vault, buy anything, grant new permissions, or change any other job.",
+		"If a state file in a writable folder is owned by root, you cannot chown it; rename it aside as <name>.root-backup-<date> (never delete it), then rerun the job so it recreates the file.",
 		"If the fix needs the owner (a login, a credential, money, an account, or a change to what the job is for), do not work around it.",
 		`If you fixed it, answer exactly "FIXED: <what was wrong and what you changed>". That line is kept in the log and not sent to the owner.`,
 		"If you could not fix it, answer in one or two lines for the owner: what is wrong, what you tried, and what they need to do.",

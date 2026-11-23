@@ -31,6 +31,10 @@ If there is no reply: check the logs for `ignoring message from non-allowed send
 - New capabilities are packs (see "Packs" below). A pack keeps everything it needs inside `packs/<name>/` and touches `src/` only when the runtime truly lacks a hook. Shipped packs must be useful to any owner; anything specific to one person belongs in `data/packs/`, outside the repository.
 - `@spectrum-ts/*` and `@earendil-works/pi-*` are pinned to exact versions; both ship breaking changes. Read their type definitions in `node_modules` before changing calls into them.
 
+## Touching a running container
+
+`docker exec nano ...` runs as root, because only the entrypoint drops privileges. Anything it creates under `/data` is root-owned and unwritable (or unreadable, for mode-600 state files) to Nano, and a scheduled job that needs it fails with `Permission denied`. Always pass the owner's ids: `docker exec -u "$NANO_UID:$NANO_GID" nano ...`. That includes the first test run of a script you just wrote. Start-up hands root-owned files under `data/packs/` and `data/workspace/` back to that user, but only on restart, so do not rely on it.
+
 ## Layout
 
 ```

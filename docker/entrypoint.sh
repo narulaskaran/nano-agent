@@ -12,6 +12,14 @@ if [ "$(id -u)" = "0" ]; then
   if [ "$(stat -c %u "$data")" != "$uid" ]; then
     chown -R "$uid:$gid" "$data"
   fi
+  # Packs and workspace under the data directory are the agent's to edit, and jobs keep state there. A root-owned file
+  # (made by `docker exec` without -u, which runs as root) breaks the job, so hand it back.
+  # --from=0 touches only root-owned entries; -R does not follow symlinks; ! -L skips symlinked roots. skills/ is left alone.
+  for dir in "$data/packs" "$data/workspace"; do
+    if [ ! -L "$dir" ] && [ -d "$dir" ]; then
+      chown -R --from=0 "$uid:$gid" "$dir" || echo "nano: could not take back root-owned files in $dir" >&2
+    fi
+  done
   # A fresh install gets a starter knowledge base; an existing one is never touched.
   kb="${NANO_KB_DIR:-$data/kb}"
   if [ -d "$kb" ] && [ -z "$(ls -A "$kb")" ]; then
