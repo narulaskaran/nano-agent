@@ -4,11 +4,13 @@ import type { AgentSession, ModelRuntime } from "@earendil-works/pi-coding-agent
 import { Type } from "typebox";
 import { baseMessageId, type Channel, clip, type Inbound, type Revision } from "./channel.ts";
 import { type Config, currentTimezone, localStamp } from "./config.ts";
+import { decisionTransport, type Transport } from "./decide.ts";
 import { readJsonFile, writeJsonFile } from "./json-store.ts";
 import { getMainModel } from "./models.ts";
 import { refreshProviderSettings } from "./provider-settings.ts";
 import { packExtensions } from "./packs.ts";
 import { buildSystemPrompt } from "./prompt.ts";
+import { LONG_HINT, logRoute, route } from "./router.ts";
 import type { Scheduler } from "./scheduler.ts";
 import { assistantText, createNanoSession } from "./session.ts";
 import { taskTools } from "./task-tools.ts";
@@ -140,7 +142,7 @@ export class TurnQueue<T extends { from: string }> {
 }
 
 type Work =
-	| { from: "owner"; spoken: string; images: { type: "image"; data: string; mimeType: string }[] }
+	| { from: "owner"; spoken: string; images: { type: "image"; data: string; mimeType: string }[]; hint?: string }
 	| { from: "system"; text: string; note: string };
 
 /** What the turn in progress is doing, so a new owner message knows whether it can still change it. */
@@ -163,6 +165,11 @@ interface RunState {
 
 /** How many sends made before the session exists are kept for it. */
 const DELIVERED_KEEP = 5;
+
+export interface ConversationOptions {
+	/** How the router's decisions are made; defaults to decide.ts's transport. For tests. */
+	decisionTransport?: Transport;
+}
 
 export class Conversation {
 	private session?: AgentSession;
@@ -188,6 +195,11 @@ export class Conversation {
 	private run?: RunState;
 	/** Texts `deliver` sent before the session was started, for its first turn to record. */
 	private delivered: string[] = [];
+	/** Owner messages the router answered with no turn before the session was started, for its first turn to record. */
+	private unanswered: string[] = [];
+	/** Owner messages are routed one at a time, in arrival order. */
+	private routing: Promise<void> = Promise.resolve();
+	private readonly router?: Transport;
 
 	constructor(
 		spaceId: string,
@@ -197,8 +209,10 @@ export class Conversation {
 		modelRuntime: ModelRuntime,
 		scheduler: Scheduler,
 		tasks: TaskManager,
+		options: ConversationOptions = {},
 	) {
 		this.spaceId = spaceId;
+		this.router = config.router ? (options.decisionTransport ?? decisionTransport()) : undefined;
 		this.config = config;
 		this.channel = channel;
 		this.store = store;
@@ -283,10 +297,67 @@ export class Conversation {
 			.map((f) => ({ type: "image" as const, data: readFileSync(f.path).toString("base64"), mimeType: f.mimeType }));
 		const fileNotes = files.map((f) => `[${f.kind} received: ${f.path}]`).join("\n");
 		const spoken = [body, fileNotes].filter(Boolean).join("\n");
+		const before = { recent: [...this.state.recent], lastActivity: this.state.lastActivity };
 		if (isIdle(this.state.lastActivity, this.config.idleHours)) this.rolloverAt ??= Date.now();
 		this.record("owner", spoken);
 
 		const work: Work = { from: "owner", spoken, images };
+		// Chained even when the router is off or skipped, so a message never overtakes one still being routed.
+		this.routing = this.routing.then(() => this.routeOwner(work, before, files.length > 0)).catch((error) => {
+			console.error("nano: routing failed:", error);
+			this.dispatch(work);
+		});
+	}
+
+	/**
+	 * Decide what an owner message needs before its turn (router.ts), then dispatch it. Only a message that would
+	 * start a turn of its own is routed: one that joins or waits behind a running turn keeps today's handling.
+	 */
+	private async routeOwner(work: Work & { from: "owner" }, before: { recent: Turn[]; lastActivity: number }, hasFiles: boolean): Promise<void> {
+		if (!this.router || this.run || this.queue.busy) return this.dispatch(work);
+		const now = Date.now();
+		const decision = await route(
+			{ message: work.spoken, recent: before.recent, now, running: this.tasks.active().map((t) => t.title) },
+			{ transport: this.router, logPath: join(this.config.dataDir, "decisions.jsonl") },
+		);
+		const actions: string[] = [];
+		// Something may have started while the decision was being made; then the message joins it as usual.
+		const free = !this.run && !this.queue.busy;
+		if (free && decision.noReply && !hasFiles) {
+			actions.push("no-reply");
+		} else {
+			const quietMinutes = before.lastActivity > 0 ? (now - before.lastActivity) / 60_000 : 0;
+			if (free && decision.newTopic && this.rolloverAt === undefined && quietMinutes >= this.config.topicIdleMinutes && (this.session || this.state.sessionFile)) {
+				this.rolloverAt = now;
+				actions.push("new-context");
+			}
+			if (decision.long) {
+				work.hint = LONG_HINT;
+				actions.push("delegate-hint");
+			}
+		}
+		logRoute(join(this.config.dataDir, "router.jsonl"), { answers: decision.answers, ms: decision.ms, actions, error: decision.error, busy: free ? undefined : true });
+		const summary = Object.entries(decision.answers).map(([id, a]) => `${id}=${a.label} ${a.p.toFixed(2)}`).join(" ");
+		console.error(`nano: routed (${decision.ms} ms) ${summary || decision.error}${actions.length ? ` -> ${actions.join(", ")}` : ""}`);
+		if (actions.includes("no-reply")) return this.noteUnanswered(work.spoken);
+		this.dispatch(work);
+	}
+
+	/** An owner message the router decided needs no reply: the session still learns it was said. */
+	private async noteUnanswered(spoken: string): Promise<void> {
+		if (this.session) await this.recordUnanswered(this.session, spoken);
+		else this.unanswered = [...this.unanswered, spoken].slice(-DELIVERED_KEEP);
+	}
+
+	private async recordUnanswered(session: AgentSession, spoken: string): Promise<void> {
+		const content = `[${localStamp(this.config)}] [The owner said: "${clip(spoken)}". It only closed the exchange, so no reply was sent.]`;
+		await session
+			.sendCustomMessage({ customType: "nano-unanswered", content, display: false }, { triggerTurn: false })
+			.catch((error) => console.error("nano: could not record an unanswered message:", (error as Error)?.message ?? error));
+	}
+
+	private dispatch(work: Work & { from: "owner" }): void {
+		const { spoken, images } = work;
 		const run = this.run;
 		const streaming = run !== undefined && this.session?.isStreaming === true;
 		if (this.config.inbound === "interrupt" && run?.from === "owner") {
@@ -329,7 +400,9 @@ export class Conversation {
 			const { session, carry } = await this.ensureSession();
 			// Sent before the session existed. A new context window already carries them over in `carry`.
 			const delivered = this.delivered.splice(0);
+			const unanswered = this.unanswered.splice(0);
 			if (!carry) for (const text of delivered) await this.recordDelivered(session, text);
+			if (!carry) for (const text of unanswered) await this.recordUnanswered(session, text);
 			const intro = carry
 				? `[New context window after a gap. The last messages before it, for continuity only:\n${carry}]\n\n`
 				: "";
@@ -337,7 +410,7 @@ export class Conversation {
 			if (run.from === "owner" && this.config.inbound === "interrupt") batch = [...batch, ...this.queue.takeNext("owner")];
 			run.phase = "starting";
 			const images = batch.flatMap((w) => (w.from === "owner" ? w.images : []));
-			const body = batch.map((w) => (w.from === "owner" ? this.stamp(w.spoken) : this.stamp(w.text, w.note))).join("\n\n");
+			const body = batch.map((w) => (w.from === "owner" ? this.stamp(w.spoken) + (w.hint ? `\n[${w.hint}]` : "") : this.stamp(w.text, w.note))).join("\n\n");
 			await session.prompt(intro + body, images.length > 0 ? { images } : undefined);
 		} catch (error) {
 			await this.fail(error);
