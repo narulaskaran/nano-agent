@@ -343,3 +343,44 @@ test("redaction preserves valid JSON and SSE when numeric statistics resemble se
 	assert.equal(JSON.parse(safe.split("\n")[0].slice(6)).choices[0].message.content, "[redacted]");
 	assert.match(safe, /data: \[DONE\]/);
 });
+
+test("decisions follow an OpenRouter main connection, send only System One fields, and always require ZDR", async () => {
+	let data = saveProvider(emptyStore(), form("router", { baseUrl: "https://openrouter.ai/api/v1" }));
+	data = saveRoles(data, { main_provider: "router", main_model: "owner-model" });
+	let seen;
+	const answer = { model: "typesafe/jev-1.14", answers: { a: { type: "noul", noul: 0.9 } } };
+	const result = await runRole(
+		data,
+		"decide",
+		{ model: "attacker-model", state: "text", questions: { a: { type: "noul", instructions: "Is it?" } }, provider: { zdr: false }, base_url: "https://evil.example" },
+		async (p, path, opts) => {
+			seen = { p, path, body: JSON.parse(opts.body) };
+			return ok(answer);
+		},
+	);
+	assert.equal(result.status, 200);
+	assert.equal(seen.p.id, "router");
+	assert.equal(seen.path, "/systemone");
+	assert.deepEqual(seen.body, {
+		model: "typesafe/jev-1.14",
+		state: "text",
+		questions: { a: { type: "noul", instructions: "Is it?" } },
+		provider: { zdr: true, data_collection: "deny" },
+	});
+	await assert.rejects(runRole(data, "decide", { state: "text", questions: {} }, async () => ok(answer)), /at least one question/);
+});
+
+test("decisions are refused without an OpenRouter connection and need a System One model", async () => {
+	const data = configured();
+	await assert.rejects(runRole(data, "decide", { state: "x", questions: { a: { type: "noul", instructions: "?" } } }, async () => ok({})), /No provider is configured for Decisions/);
+	assert.throws(() => saveRoles(data, { main_provider: "cloud", main_model: "m", decide_provider: "cloud", decide_model: "typesafe/jev-1.14" }), /OpenRouter connection/);
+	const router = saveProvider(data, form("router", { baseUrl: "https://openrouter.ai/api/v1" }));
+	assert.throws(() => saveRoles(router, { main_provider: "cloud", main_model: "m", decide_provider: "router", decide_model: "openai/gpt-x" }), /System One model/);
+	const saved = saveRoles(router, { main_provider: "cloud", main_model: "m", decide_provider: "router", decide_model: "typesafe/jev-1.13" });
+	let model;
+	await runRole(saved, "decide", { state: "x", questions: { a: { type: "noul", instructions: "?" } } }, async (_p, _path, opts) => {
+		model = JSON.parse(opts.body).model;
+		return ok({});
+	});
+	assert.equal(model, "typesafe/jev-1.13");
+});

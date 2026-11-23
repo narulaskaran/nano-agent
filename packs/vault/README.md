@@ -38,7 +38,7 @@ It binds to `NANO_VAULT_BIND`, or else the first local address in Tailscale's CG
 
 ## Providers and Models & voice
 
-The portal's **Providers** page saves a model connection (base URL, key, API format, capabilities). **Models & voice** assigns connections to the main conversation, background tasks, private work, speech to text and text to speech (the last two need the `speech` pack). Blank assignments keep the `.env` settings. **Test connection** checks the key and loads model IDs. Changes apply on the next request.
+The portal's **Providers** page saves a model connection (base URL, key, API format, capabilities). **Models & voice** assigns connections to the main conversation, background tasks, private work, speech to text and text to speech (the last two need the `speech` pack), and decisions. **Decisions** (used by `nano-decide`) must be an OpenRouter connection with a System One model such as `typesafe/jev-1.14`; left blank, they use the main conversation's connection when it is OpenRouter. The daemon forwards only the decision fields and requires zero data retention on every request. Blank assignments keep the `.env` settings. **Test connection** checks the key and loads model IDs. Changes apply on the next request.
 
 Formats: **OpenAI-compatible** (DeepSeek and OpenRouter presets), **Anthropic Messages**, **Bark / Woof** (local speech), and **Custom**. Custom maps each capability to a `path`, a `request` template and response field paths such as `result.text`, with no executable code. Template variables: `{{model}}`, `{{messages}}`, `{{system}}`, `{{tools}}`, `{{text}}`, `{{audio_base64}}`, `{{voice}}`, `{{max_tokens}}`; an exact placeholder keeps the value's JSON type. Put credentials in the key field, not in templates.
 
