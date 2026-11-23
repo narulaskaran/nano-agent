@@ -25,7 +25,7 @@ export const ROLES = {
 	tts: "Text to speech",
 	decide: "Decisions",
 };
-/** System One model used for decisions when the owner has not chosen one. */
+/** Decision model used when decisions are unset and the main conversation's connection is OpenRouter. */
 export const DECIDE_MODEL = "typesafe/jev-1.14";
 export const FORMATS = {
 	openai: "OpenAI-compatible",
@@ -34,10 +34,16 @@ export const FORMATS = {
 	bark: "Bark (raw WAV)",
 	woof: "Woof (plain text)",
 };
+export const CAPABILITIES = {
+	chat: "Chat and background work",
+	stt: "Speech to text",
+	tts: "Text to speech",
+	decide: "Typed decisions (System One API)",
+};
 export const PRESETS = {
 	anthropic: { name: "Anthropic", baseUrl: "https://api.anthropic.com/v1", format: "anthropic", capabilities: ["chat"] },
 	deepseek: { name: "DeepSeek", baseUrl: "https://api.deepseek.com", format: "openai", capabilities: ["chat"] },
-	openrouter: { name: "OpenRouter", baseUrl: "https://openrouter.ai/api/v1", format: "openai", capabilities: ["chat", "stt", "tts"] },
+	openrouter: { name: "OpenRouter", baseUrl: "https://openrouter.ai/api/v1", format: "openai", capabilities: ["chat", "stt", "tts", "decide"] },
 	custom: { name: "", baseUrl: "", format: "openai", capabilities: ["chat"] },
 };
 const capability = (role) => (["main", "background", "local"].includes(role) ? "chat" : role);
@@ -48,11 +54,13 @@ const isOpenRouter = (p) => {
 		return false;
 	}
 };
+/** OpenRouter routing forced on every decision sent there: zero data retention, no training on the request. */
+const OPENROUTER_ZDR = { zdr: true, data_collection: "deny" };
 /**
- * Whether a connection can serve a role. Decisions use OpenRouter's System One API, and only OpenRouter:
- * it is the endpoint that can enforce zero data retention on each request.
+ * Whether a connection can serve a role. OpenRouter serves decisions even when its connection was saved
+ * before the decide capability existed.
  */
-export const serves = (p, role) => Boolean(p) && (role === "decide" ? isOpenRouter(p) : p.capabilities.includes(capability(role)));
+export const serves = (p, role) => Boolean(p) && (p.capabilities.includes(capability(role)) || (role === "decide" && isOpenRouter(p)));
 export function publicProvider(p) {
 	const { key, ...rest } = p;
 	return { ...rest, hasKey: Boolean(key) };
@@ -83,8 +91,10 @@ export function saveProvider(data, form) {
 	const baseUrl = normalizeBase(form.baseUrl, local);
 	const format = form.format;
 	if (!Object.hasOwn(FORMATS, format)) throw new Error("Choose an API format.");
-	const capabilities = ["chat", "stt", "tts"].filter((c) => form[`cap_${c}`] === "yes");
+	const capabilities = formCapabilities(form);
 	if (!capabilities.length) throw new Error("Choose at least one supported capability.");
+	if (capabilities.includes("decide") && format !== "openai")
+		throw new Error("Typed decisions need the OpenAI-compatible format: they are sent to /systemone under the base URL.");
 	if (format === "anthropic" && capabilities.some((c) => c !== "chat"))
 		throw new Error("Anthropic Messages supports chat; use another connection for speech.");
 	if ((format === "bark" && capabilities.some((c) => c !== "stt")) || (format === "woof" && capabilities.some((c) => c !== "tts")))
@@ -127,6 +137,7 @@ export function saveProvider(data, form) {
 	validateRoutes(next);
 	return next;
 }
+export const formCapabilities = (form) => Object.keys(CAPABILITIES).filter((c) => form[`cap_${c}`] === "yes");
 export function deleteProvider(data, id) {
 	if (Object.values(data.roles ?? {}).some((r) => r?.provider === id || r?.fallback?.provider === id))
 		throw new Error("Choose another connection for its assigned jobs before deleting this provider.");
@@ -164,8 +175,11 @@ export function validateRoutes(data) {
 		for (const r of [route, route.fallback].filter(Boolean)) {
 			const p = (data.providers ?? []).find((p) => p.id === r.provider);
 			if (!serves(p, role))
-				throw new Error(role === "decide" ? "Decisions need an OpenRouter connection." : `${ROLES[role]} needs a connection that supports ${capability(role)}.`);
-			if (role === "decide" && !String(r.model ?? "").startsWith("typesafe/")) throw new Error("Decisions need a System One model ID, such as typesafe/jev-1.14.");
+				throw new Error(
+					role === "decide"
+						? "Decisions need a connection with typed decisions enabled."
+						: `${ROLES[role]} needs a connection that supports ${capability(role)}.`,
+				);
 			if (role === "local" && !p.local) throw new Error("Private work and its fallback must use a local connection.");
 			if (p.catalog?.[capability(role)] && !p.catalog[capability(role)].includes(r.model))
 				throw new Error(`${ROLES[role]}: this model is not listed for that capability. Test the connection again to refresh models.`);
@@ -183,7 +197,7 @@ export function roleRoute(data, role) {
 		throw new Error("The job has an invalid provider configuration.");
 	return { ...route, connection: p };
 }
-/** Unset decisions follow the main conversation's connection when it is OpenRouter, with the default System One model. */
+/** Unset decisions follow the main conversation's connection when it is OpenRouter, with DECIDE_MODEL. */
 function defaultDecideRoute(data) {
 	const main = data.roles?.main;
 	const p = (data.providers ?? []).find((p) => p.id === main?.provider);
@@ -304,14 +318,20 @@ export async function runRole(data, role, payload, request = providerRequest, { 
 		const provider = (data.providers ?? []).find((p) => p.id === r.provider);
 		if (!serves(provider, role) || (role === "local" && !provider.local)) throw new Error("Invalid fallback connection.");
 		if (role === "decide") {
-			// Only the System One fields are forwarded: the caller cannot pick the model or loosen the routing.
+			// Only the decision fields are forwarded: the caller cannot pick the model, the endpoint or the routing.
 			const { state, questions, assets } = payload;
 			if (state === undefined || state === null || !questions || typeof questions !== "object" || Array.isArray(questions) || !Object.keys(questions).length)
 				throw new Error("A decision needs state and at least one question.");
 			return send(provider, "/systemone", {
 				method: "POST",
 				contentType: "application/json",
-				body: JSON.stringify({ model: r.model, state, questions, ...(assets ? { assets } : {}), provider: { zdr: true, data_collection: "deny" } }),
+				body: JSON.stringify({
+					model: r.model,
+					state,
+					questions,
+					...(assets ? { assets } : {}),
+					...(isOpenRouter(provider) ? { provider: OPENROUTER_ZDR } : {}),
+				}),
 			});
 		}
 		if (provider.format === "custom") {

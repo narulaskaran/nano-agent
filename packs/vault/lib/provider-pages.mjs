@@ -1,4 +1,4 @@
-import { DECIDE_MODEL, FORMATS, PRESETS, ROLES, publicProvider, serves } from "./providers.mjs";
+import { CAPABILITIES, DECIDE_MODEL, FORMATS, PRESETS, ROLES, formCapabilities, publicProvider, serves } from "./providers.mjs";
 
 // Shared page helpers. portal.mjs reuses these for the credential forms so every
 // page speaks one visual language. All output is escaped, server rendered, no script.
@@ -74,9 +74,18 @@ export function providerForm(token, values, editing = false) {
 ${field("Connection ID", "id", values.id, { locked: editing, extra: editing ? "" : 'required pattern="[A-Za-z0-9][A-Za-z0-9._-]{0,63}"' })}
 ${field("Display name", "name", values.name)}
 ${field("Base URL", "baseUrl", values.baseUrl, { type: "url", extra: "required", hint: "Include /v1 when the service requires it." })}
-${select("API format", "format", Object.entries(FORMATS), values.format || "openai", "Compatible API uses /chat/completions, /audio/transcriptions and /audio/speech. Enable only the capabilities your service supports.")}
+${select("API format", "format", Object.entries(FORMATS), values.format || "openai", "Compatible API uses /chat/completions, /audio/transcriptions, /audio/speech and, for typed decisions, /systemone. Enable only the capabilities your service supports.")}
 </section>
-<section class="card panel"><fieldset><legend>Supported capabilities</legend>${["chat", "stt", "tts"].map((c) => check({ chat: "Chat and background work", stt: "Speech to text", tts: "Text to speech" }[c], `cap_${c}`, values.capabilities?.includes(c))).join("")}
+<section class="card panel"><fieldset><legend>Supported capabilities</legend>${Object.entries(CAPABILITIES)
+		.map(([c, label]) =>
+			check(
+				label,
+				`cap_${c}`,
+				values.capabilities?.includes(c),
+				c === "decide" ? "A decision model that speaks the System One API, for example Jev on OpenRouter or a self-hosted Clef server. Needs the OpenAI-compatible format." : "",
+			),
+		)
+		.join("")}
 ${check("Runs on my local network (required for private work)", "local", values.local, "Local endpoints use a literal private or loopback IP. Hosted endpoints require HTTPS.")}</fieldset></section>
 <section class="card panel"><h2>Authentication</h2>
 ${field(keyLabel, "key", "", { type: "password", autocomplete: "new-password", hint: keyHint })}
@@ -97,7 +106,7 @@ const ROLE_HELP = {
 	local: "Private work. Only local-network connections can be chosen.",
 	stt: "Turns voice messages into text.",
 	tts: "Speaks audio replies.",
-	decide: `Quick typed judgements (yes/no, pick one, rate) for scripts and checks. OpenRouter only; every request requires zero data retention. Unset, it uses the main conversation's OpenRouter connection with ${DECIDE_MODEL}.`,
+	decide: `Quick typed judgements (yes/no, pick one, rate) for scripts and checks, from a decision model (for example Jev on OpenRouter, or a self-hosted Clef server). Requests to OpenRouter always require zero data retention. Unset, it uses the main conversation's connection with ${DECIDE_MODEL} when that connection is OpenRouter.`,
 };
 
 function routeFields(role, route, providers, fallback = false) {
@@ -109,16 +118,16 @@ function routeFields(role, route, providers, fallback = false) {
 		: role === "local"
 			? "No local-network connection supports this yet. Add one under Providers."
 			: role === "decide"
-				? "Needs an OpenRouter connection. Add one under Providers."
+				? "No connection has typed decisions enabled. Add or edit one under Providers."
 				: "No connection supports this yet. Add one under Providers.";
 	const modelHint = fallback
 		? ""
 		: role === "decide"
-			? `A System One model, such as ${DECIDE_MODEL}.`
+			? `The decision model's ID, for example ${DECIDE_MODEL} on OpenRouter.`
 			: cap === "chat"
 				? "Needed once you choose a connection. Suggestions appear after you test it."
 				: "Needed for OpenAI-compatible connections; optional for Bark and Woof.";
-	const unset = fallback ? "No fallback" : role === "background" ? "Follow main conversation" : role === "decide" ? "Follow main conversation (OpenRouter only)" : "Use environment / existing configuration";
+	const unset = fallback ? "No fallback" : role === "background" ? "Follow main conversation" : role === "decide" ? "Follow main conversation (when it is OpenRouter)" : "Use environment / existing configuration";
 	return `${select(fallback ? "Fallback connection" : "Connection", `${prefix}provider`, [["", unset], ...available.map((p) => [p.id, p.name])], route?.provider || "", fallback ? "Used for outages or rate limits." : none)}
 ${field("Model ID", `${prefix}model`, route?.model, { extra: 'list="model-ids"', hint: modelHint })}
 ${role === "tts" ? field("Voice", `${prefix}voice`, route?.voice, { hint: fallback ? "" : "Compatible and custom APIs use this voice setting. Woof uses the voice configured by its service." }) : ""}`;
@@ -210,7 +219,7 @@ export async function providerPost(path, form, options) {
 								...form,
 								hasKey: false,
 								local: form.local === "yes",
-								capabilities: ["chat", "stt", "tts"].filter((c) => form[`cap_${c}`] === "yes"),
+								capabilities: formCapabilities(form),
 							},
 							(options.read().providers ?? []).some((p) => p.id === form.id),
 						)

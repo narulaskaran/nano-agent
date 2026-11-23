@@ -4,14 +4,18 @@ import { dirname } from "node:path";
 import { providerFetch, providerSettingsAvailable } from "./provider-client.ts";
 
 /**
- * Typed decisions from a System One model (TypeSafe's Jev) through OpenRouter's `/systemone` API.
+ * Typed decisions from the decision model: any endpoint that speaks the System One API (`{model, state,
+ * questions}` in, answers out), for example Jev on OpenRouter or a self-hosted Clef server.
  * One forward pass returns probabilities for declared answers instead of generated text, so code can
- * branch on them. Every request requires zero data retention. This is still a cloud call: private
- * material belongs with the local model (see local.ts).
+ * branch on them. Requests to OpenRouter always require zero data retention. The endpoint may be a
+ * cloud service, so private material belongs with the local model (see local.ts).
  */
 
+/** The decision model used with an OpenRouter key when no decision endpoint is set. */
 export const DECIDE_MODEL = "typesafe/jev-1.14";
-const OPENROUTER_SYSTEM_ONE = "https://openrouter.ai/api/v1/systemone";
+const OPENROUTER_DECISIONS = "https://openrouter.ai/api/v1/systemone";
+/** OpenRouter's routing for decisions: zero data retention, no training on the request. */
+const OPENROUTER_ZDR = { zdr: true, data_collection: "deny" };
 const LOG_MAX_BYTES = 5 * 1024 * 1024;
 
 export type Question =
@@ -39,8 +43,9 @@ export interface DecisionResponse {
 export type Transport = (body: string, signal?: AbortSignal) => Promise<{ status: number; text: string }>;
 
 /**
- * The vault's decision route when the vault runs (the key stays there), otherwise OpenRouter directly
- * with OPENROUTER_API_KEY. Undefined when neither is available.
+ * The vault's decision route when the vault runs (the key stays there). Otherwise NANO_DECIDE_URL with
+ * NANO_DECIDE_MODEL and an optional NANO_DECIDE_API_KEY, or, with neither set, OpenRouter with
+ * OPENROUTER_API_KEY and DECIDE_MODEL. Undefined when none of these is available.
  */
 export function decisionTransport(env: NodeJS.ProcessEnv = process.env): Transport | undefined {
 	if (providerSettingsAvailable()) {
@@ -49,19 +54,31 @@ export function decisionTransport(env: NodeJS.ProcessEnv = process.env): Transpo
 			return { status: response.status, text: await response.text() };
 		};
 	}
-	const key = env.OPENROUTER_API_KEY?.trim();
-	if (!key) return undefined;
-	const model = env.NANO_DECIDE_MODEL?.trim() || DECIDE_MODEL;
+	const custom = env.NANO_DECIDE_URL?.trim();
+	const url = custom || (env.OPENROUTER_API_KEY?.trim() ? OPENROUTER_DECISIONS : undefined);
+	const model = env.NANO_DECIDE_MODEL?.trim() || (custom ? undefined : DECIDE_MODEL);
+	if (!url || !model) return undefined;
+	const openRouter = isOpenRouter(url);
+	const key = env.NANO_DECIDE_API_KEY?.trim() || (openRouter ? env.OPENROUTER_API_KEY?.trim() : undefined);
 	return async (body, signal) => {
 		const { state, questions } = JSON.parse(body) as DecisionRequest;
-		const response = await fetch(OPENROUTER_SYSTEM_ONE, {
+		const response = await fetch(url, {
 			method: "POST",
 			signal: signal ?? AbortSignal.timeout(60_000),
-			headers: { authorization: `Bearer ${key}`, "content-type": "application/json" },
-			body: JSON.stringify({ model, state, questions, provider: { zdr: true, data_collection: "deny" } }),
+			headers: { ...(key ? { authorization: `Bearer ${key}` } : {}), "content-type": "application/json" },
+			// Other endpoints may reject fields they do not know, so only OpenRouter gets its routing field.
+			body: JSON.stringify({ model, state, questions, ...(openRouter ? { provider: OPENROUTER_ZDR } : {}) }),
 		});
 		return { status: response.status, text: await response.text() };
 	};
+}
+
+function isOpenRouter(url: string): boolean {
+	try {
+		return new URL(url).hostname === "openrouter.ai";
+	} catch {
+		return false;
+	}
 }
 
 export function validateRequest(request: DecisionRequest): void {
@@ -108,7 +125,8 @@ export interface DecideOptions {
 export async function decide(request: DecisionRequest, options: DecideOptions = {}): Promise<DecisionResponse> {
 	validateRequest(request);
 	const transport = options.transport ?? decisionTransport();
-	if (!transport) throw new Error("no decision model is configured: it needs the vault's OpenRouter connection or OPENROUTER_API_KEY");
+	if (!transport)
+		throw new Error("no decision model is configured: it needs a vault decision connection, NANO_DECIDE_URL with NANO_DECIDE_MODEL, or OPENROUTER_API_KEY");
 	const now = options.now ?? Date.now;
 	const started = now();
 	const out = await transport(JSON.stringify({ state: request.state, questions: request.questions }), options.signal);

@@ -344,7 +344,7 @@ test("redaction preserves valid JSON and SSE when numeric statistics resemble se
 	assert.match(safe, /data: \[DONE\]/);
 });
 
-test("decisions follow an OpenRouter main connection, send only System One fields, and always require ZDR", async () => {
+test("decisions follow an OpenRouter main connection, send only decision fields, and always require ZDR", async () => {
 	let data = saveProvider(emptyStore(), form("router", { baseUrl: "https://openrouter.ai/api/v1" }));
 	data = saveRoles(data, { main_provider: "router", main_model: "owner-model" });
 	let seen;
@@ -370,17 +370,63 @@ test("decisions follow an OpenRouter main connection, send only System One field
 	await assert.rejects(runRole(data, "decide", { state: "text", questions: {} }, async () => ok(answer)), /at least one question/);
 });
 
-test("decisions are refused without an OpenRouter connection and need a System One model", async () => {
+test("decisions need a connection with typed decisions enabled, and take any model ID", async () => {
 	const data = configured();
 	await assert.rejects(runRole(data, "decide", { state: "x", questions: { a: { type: "noul", instructions: "?" } } }, async () => ok({})), /No provider is configured for Decisions/);
-	assert.throws(() => saveRoles(data, { main_provider: "cloud", main_model: "m", decide_provider: "cloud", decide_model: "typesafe/jev-1.14" }), /OpenRouter connection/);
-	const router = saveProvider(data, form("router", { baseUrl: "https://openrouter.ai/api/v1" }));
-	assert.throws(() => saveRoles(router, { main_provider: "cloud", main_model: "m", decide_provider: "router", decide_model: "openai/gpt-x" }), /System One model/);
-	const saved = saveRoles(router, { main_provider: "cloud", main_model: "m", decide_provider: "router", decide_model: "typesafe/jev-1.13" });
-	let model;
-	await runRole(saved, "decide", { state: "x", questions: { a: { type: "noul", instructions: "?" } } }, async (_p, _path, opts) => {
-		model = JSON.parse(opts.body).model;
+	assert.throws(() => saveRoles(data, { main_provider: "cloud", main_model: "m", decide_provider: "cloud", decide_model: "fixture/decider" }), /typed decisions enabled/);
+	assert.throws(() => saveProvider(data, form("claude", { format: "anthropic", cap_decide: "yes" })), /OpenAI-compatible format/);
+	const decider = saveProvider(data, form("decider", { cap_chat: undefined, cap_decide: "yes", baseUrl: "https://decisions.example.com/v1" }));
+	assert.throws(() => saveRoles(decider, { main_provider: "cloud", main_model: "m", decide_provider: "decider" }), /needs a model ID/);
+	const saved = saveRoles(decider, { main_provider: "cloud", main_model: "m", decide_provider: "decider", decide_model: "fixture/decider-2" });
+	let seen;
+	await runRole(saved, "decide", { model: "attacker-model", state: "x", questions: { a: { type: "noul", instructions: "?" } } }, async (p, path, opts) => {
+		seen = { p, path, body: JSON.parse(opts.body) };
 		return ok({});
 	});
-	assert.equal(model, "typesafe/jev-1.13");
+	assert.equal(seen.p.id, "decider");
+	assert.equal(seen.path, "/systemone");
+	assert.deepEqual(seen.body, { model: "fixture/decider-2", state: "x", questions: { a: { type: "noul", instructions: "?" } } }, "no OpenRouter routing field");
+});
+
+test("a local decision server without a key receives the decision at its own /systemone URL", async (t) => {
+	let seen;
+	const server = http.createServer((req, res) => {
+		let body = "";
+		req.on("data", (chunk) => (body += chunk));
+		req.on("end", () => {
+			seen = { method: req.method, url: req.url, authorization: req.headers.authorization, body: JSON.parse(body) };
+			res.setHeader("content-type", "application/json");
+			res.end(JSON.stringify({ model: "fixture/clef-flash", answers: { a: { type: "noul", noul: 0.8 } } }));
+		});
+	});
+	await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+	t.after(() => server.close());
+	let data = saveProvider(
+		configured(),
+		form("clef", { cap_chat: undefined, cap_decide: "yes", local: "yes", key: "", baseUrl: `http://127.0.0.1:${server.address().port}/v1` }),
+	);
+	data = saveRoles(data, { main_provider: "cloud", main_model: "m", decide_provider: "clef", decide_model: "fixture/clef-flash" });
+	const response = await runRole(data, "decide", { state: "x", questions: { a: { type: "noul", instructions: "?" } }, provider: { zdr: false } });
+	assert.equal(JSON.parse(response.body).answers.a.noul, 0.8);
+	assert.deepEqual(seen, {
+		method: "POST",
+		url: "/v1/systemone",
+		authorization: undefined,
+		body: { model: "fixture/clef-flash", state: "x", questions: { a: { type: "noul", instructions: "?" } } },
+	});
+});
+
+test("an OpenRouter decision connection always gets ZDR, with or without the decide capability saved", async () => {
+	let data = saveProvider(configured(), form("router", { baseUrl: "https://openrouter.ai/api/v1", cap_decide: "yes" }));
+	data = saveProvider(data, form("older-router", { baseUrl: "https://openrouter.ai/api/v1" }));
+	for (const id of ["router", "older-router"]) {
+		const saved = saveRoles(data, { main_provider: "cloud", main_model: "m", decide_provider: id, decide_model: "fixture/decider" });
+		let body;
+		await runRole(saved, "decide", { state: "x", questions: { a: { type: "noul", instructions: "?" } }, provider: { zdr: false } }, async (_p, _path, opts) => {
+			body = JSON.parse(opts.body);
+			return ok({});
+		});
+		assert.deepEqual(body.provider, { zdr: true, data_collection: "deny" }, id);
+		assert.equal(body.model, "fixture/decider");
+	}
 });
