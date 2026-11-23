@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import type { Config } from "../src/config.ts";
 import { handBackPrompt } from "../src/tasks.ts";
+import { noDecisionModel } from "./helpers/no-decision-model.ts";
 import { type BackgroundWork, cronMatches, isTransient, type JobSink, REPAIR_GRACE_MS, RETRY_MS, Scheduler } from "../src/scheduler.ts";
 
 /** A scheduler on a temp directory with a sink whose sends can be made to fail. */
@@ -26,7 +27,7 @@ function setup() {
 		},
 	};
 	const config = { dataDir, owner: "owner" } as Config;
-	const scheduler = new Scheduler(config, sink);
+	const scheduler = new Scheduler(config, sink, { decisionTransport: noDecisionModel });
 	/** Wait for every job started by the last tick to finish. */
 	const idle = async () => {
 		const running = (scheduler as unknown as { running: Set<string> }).running;
@@ -182,7 +183,7 @@ test("when a repair cannot be started, the owner is told right away", async () =
 test("an unreadable schedule file is set aside, not silently wiped", () => {
 	const { dataDir } = setup();
 	writeFileSync(join(dataDir, "schedule.json"), "{ not json");
-	const scheduler = new Scheduler({ dataDir, owner: "owner" } as Config, { send: async () => {}, task: async () => {}, background: async () => {} });
+	const scheduler = new Scheduler({ dataDir, owner: "owner" } as Config, { send: async () => {}, task: async () => {}, background: async () => {} }, { decisionTransport: noDecisionModel });
 	assert.equal(scheduler.list().length, 0);
 	assert.ok(readdirSync(dataDir).some((name) => name.startsWith("schedule.json.corrupt-")));
 });

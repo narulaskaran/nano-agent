@@ -1,3 +1,4 @@
+import { noDecisionModel } from "./helpers/no-decision-model.ts";
 import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, writeFileSync, existsSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -15,7 +16,7 @@ test("trusted event spools retry failures, exclude overlapping deliveries and ac
   let calls=0; let release:()=>void=()=>{}; let entered:()=>void=()=>{};
   const started=new Promise<void>(resolve=>entered=resolve);
   const hold=new Promise<void>(resolve=>release=resolve);
-  const scheduler=new Scheduler(config,{send:async()=>{},background:async()=>{},task:async()=>{calls++; if(calls===1)throw new Error("temporary delivery failure");entered();await hold;}});
+  const scheduler=new Scheduler(config,{send:async()=>{},background:async()=>{},task:async()=>{calls++; if(calls===1)throw new Error("temporary delivery failure");entered();await hold;}},{decisionTransport:noDecisionModel});
   await scheduler.tick();assert.ok(existsSync(path));
   const retry=scheduler.tick();await started;
   await scheduler.tick();assert.equal(calls,2);
