@@ -1,13 +1,16 @@
 import { decide, top, type Transport } from "./decide.ts";
+import { isTransient } from "./transient.ts";
 
 /**
  * Sorting a failed scheduled run with a decision instead of a regex:
- * - transient: clears on its own, so wait for the next run;
- * - fixable:   a repair worker can fix the job's script, state or inputs;
- * - owner:     only the owner can fix it (a login, an account, money), so a repair would be wasted.
- * Undefined when the decision is unsure or fails; the caller then falls back to its regex.
+ * - transient:   clears on its own, so wait for the next run;
+ * - fixable:     a repair worker can fix the job's script, state or inputs;
+ * - owner:       only the owner can fix it (a login, an account, money), so a repair would be wasted;
+ * - unavailable: the decision service itself failed transiently (e.g. network or provider outage), so wait instead of repairing.
+ * Undefined when the decision is unsure or fails non-transiently; the caller then falls back to its regex.
  */
 export type FailureKind = "transient" | "fixable" | "owner";
+export type TriageResult = { kind: FailureKind; p: number } | { kind: "unavailable" };
 
 export const TRIAGE_MIN = 0.8;
 /**
@@ -16,6 +19,12 @@ export const TRIAGE_MIN = 0.8;
  */
 export const OWNER_MIN = 0.9;
 
+function errorText(error: unknown): string {
+	if (!(error instanceof Error)) return String(error);
+	const cause = (error as Error & { cause?: { code?: unknown; message?: unknown } }).cause;
+	return [error.message, cause?.code, cause?.message].filter((p): p is string => typeof p === "string" && p.length > 0).join(" ");
+}
+
 export async function triageFailure(input: {
 	name: string;
 	kind: string;
@@ -23,7 +32,7 @@ export async function triageFailure(input: {
 	source: string;
 	logPath?: string;
 	transport?: Transport;
-}): Promise<{ kind: FailureKind; p: number } | undefined> {
+}): Promise<TriageResult | undefined> {
 	try {
 		const response = await decide(
 			{
@@ -46,7 +55,9 @@ export async function triageFailure(input: {
 		if (best.p < (best.label === "owner" ? OWNER_MIN : TRIAGE_MIN)) return undefined;
 		return { kind: best.label as FailureKind, p: best.p };
 	} catch (error) {
-		console.error("nano: failure triage unavailable:", ((error as Error)?.message ?? String(error)).slice(0, 200));
+		const reason = errorText(error);
+		console.error("nano: failure triage unavailable:", reason.slice(0, 200));
+		if (isTransient(reason)) return { kind: "unavailable" };
 		return undefined;
 	}
 }

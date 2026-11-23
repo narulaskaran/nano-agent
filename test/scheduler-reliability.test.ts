@@ -158,6 +158,7 @@ test("a repair that fixed the job stays silent; one that could not reaches the o
 	assert.equal(handBackPrompt({ ...base, status: "done", result: "FIXED: the page moved, updated the URL" }), undefined);
 	assert.match(handBackPrompt({ ...base, status: "done", result: "The feed now needs a login. Please sign in again." }) ?? "", /needs a login/);
 	assert.match(handBackPrompt({ ...base, status: "failed", error: "worker crashed" }) ?? "", /failed: worker crashed/);
+	assert.equal(handBackPrompt({ ...base, status: "failed", error: "The provider service is unavailable" }), undefined);
 });
 
 test("a failed background run of a scheduled task goes through the same policy", async () => {
