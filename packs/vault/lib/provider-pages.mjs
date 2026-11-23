@@ -1,4 +1,4 @@
-import { FORMATS, PRESETS, ROLES, publicProvider } from "./providers.mjs";
+import { DECIDE_MODEL, FORMATS, PRESETS, ROLES, publicProvider, serves } from "./providers.mjs";
 
 // Shared page helpers. portal.mjs reuses these for the credential forms so every
 // page speaks one visual language. All output is escaped, server rendered, no script.
@@ -97,15 +97,29 @@ const ROLE_HELP = {
 	local: "Private work. Only local-network connections can be chosen.",
 	stt: "Turns voice messages into text.",
 	tts: "Speaks audio replies.",
+	decide: `Quick typed judgements (yes/no, pick one, rate) for scripts and checks. OpenRouter only; every request requires zero data retention. Unset, it uses the main conversation's OpenRouter connection with ${DECIDE_MODEL}.`,
 };
 
 function routeFields(role, route, providers, fallback = false) {
 	const prefix = `${role}_${fallback ? "fallback_" : ""}`;
 	const cap = ["main", "background", "local"].includes(role) ? "chat" : role;
-	const available = providers.filter((p) => p.capabilities.includes(cap) && (role !== "local" || p.local));
-	const none = available.length ? "" : role === "local" ? "No local-network connection supports this yet. Add one under Providers." : "No connection supports this yet. Add one under Providers.";
-	const modelHint = fallback ? "" : cap === "chat" ? "Needed once you choose a connection. Suggestions appear after you test it." : "Needed for OpenAI-compatible connections; optional for Bark and Woof.";
-	return `${select(fallback ? "Fallback connection" : "Connection", `${prefix}provider`, [["", fallback ? "No fallback" : role === "background" ? "Follow main conversation" : "Use environment / existing configuration"], ...available.map((p) => [p.id, p.name])], route?.provider || "", fallback ? "Used for outages or rate limits." : none)}
+	const available = providers.filter((p) => serves(p, role) && (role !== "local" || p.local));
+	const none = available.length
+		? ""
+		: role === "local"
+			? "No local-network connection supports this yet. Add one under Providers."
+			: role === "decide"
+				? "Needs an OpenRouter connection. Add one under Providers."
+				: "No connection supports this yet. Add one under Providers.";
+	const modelHint = fallback
+		? ""
+		: role === "decide"
+			? `A System One model, such as ${DECIDE_MODEL}.`
+			: cap === "chat"
+				? "Needed once you choose a connection. Suggestions appear after you test it."
+				: "Needed for OpenAI-compatible connections; optional for Bark and Woof.";
+	const unset = fallback ? "No fallback" : role === "background" ? "Follow main conversation" : role === "decide" ? "Follow main conversation (OpenRouter only)" : "Use environment / existing configuration";
+	return `${select(fallback ? "Fallback connection" : "Connection", `${prefix}provider`, [["", unset], ...available.map((p) => [p.id, p.name])], route?.provider || "", fallback ? "Used for outages or rate limits." : none)}
 ${field("Model ID", `${prefix}model`, route?.model, { extra: 'list="model-ids"', hint: modelHint })}
 ${role === "tts" ? field("Voice", `${prefix}voice`, route?.voice, { hint: fallback ? "" : "Compatible and custom APIs use this voice setting. Woof uses the voice configured by its service." }) : ""}`;
 }
@@ -117,7 +131,7 @@ function roleCard(role, label, route, providers) {
 	const assigned = providers.find((p) => p.id === route?.provider);
 	const status = route?.provider
 		? `<span class="badge on">${esc(assigned?.name || route.provider)}${route.model ? ` · ${esc(route.model)}` : ""}</span>`
-		: `<span class="badge off">${role === "background" ? "Follows main" : "Environment default"}</span>`;
+		: `<span class="badge off">${role === "background" || role === "decide" ? "Follows main" : "Environment default"}</span>`;
 	const hasFallback = Boolean(route?.fallback?.provider);
 	return `<section class="card job" role="group" aria-labelledby="job-${role}">
 <div class="card-head"><h2 id="job-${role}">${esc(label)}</h2>${status}</div>

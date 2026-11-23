@@ -44,7 +44,7 @@ export async function handleProviderApi(req, res, { read, scrub }) {
 		res.end(scrubProviderText(JSON.stringify(publicSettings(read())), "application/json", scrub));
 		return;
 	}
-	const match = /^\/providers\/run\/(main|background|local|stt|tts)$/.exec(req.url);
+	const match = /^\/providers\/run\/(main|background|local|stt|tts|decide)$/.exec(req.url);
 	if (!match || req.method !== "POST") {
 		req.resume();
 		res.writeHead(404);

@@ -23,7 +23,10 @@ export const ROLES = {
 	local: "Private / local work",
 	stt: "Speech to text",
 	tts: "Text to speech",
+	decide: "Decisions",
 };
+/** System One model used for decisions when the owner has not chosen one. */
+export const DECIDE_MODEL = "typesafe/jev-1.14";
 export const FORMATS = {
 	openai: "OpenAI-compatible",
 	anthropic: "Anthropic Messages",
@@ -38,6 +41,18 @@ export const PRESETS = {
 	custom: { name: "", baseUrl: "", format: "openai", capabilities: ["chat"] },
 };
 const capability = (role) => (["main", "background", "local"].includes(role) ? "chat" : role);
+const isOpenRouter = (p) => {
+	try {
+		return p?.format === "openai" && new URL(p.baseUrl).hostname === "openrouter.ai";
+	} catch {
+		return false;
+	}
+};
+/**
+ * Whether a connection can serve a role. Decisions use OpenRouter's System One API, and only OpenRouter:
+ * it is the endpoint that can enforce zero data retention on each request.
+ */
+export const serves = (p, role) => Boolean(p) && (role === "decide" ? isOpenRouter(p) : p.capabilities.includes(capability(role)));
 export function publicProvider(p) {
 	const { key, ...rest } = p;
 	return { ...rest, hasKey: Boolean(key) };
@@ -148,8 +163,9 @@ export function validateRoutes(data) {
 	for (const [role, route] of Object.entries(data.roles ?? {})) {
 		for (const r of [route, route.fallback].filter(Boolean)) {
 			const p = (data.providers ?? []).find((p) => p.id === r.provider);
-			if (!p || !p.capabilities.includes(capability(role)))
-				throw new Error(`${ROLES[role]} needs a connection that supports ${capability(role)}.`);
+			if (!serves(p, role))
+				throw new Error(role === "decide" ? "Decisions need an OpenRouter connection." : `${ROLES[role]} needs a connection that supports ${capability(role)}.`);
+			if (role === "decide" && !String(r.model ?? "").startsWith("typesafe/")) throw new Error("Decisions need a System One model ID, such as typesafe/jev-1.14.");
 			if (role === "local" && !p.local) throw new Error("Private work and its fallback must use a local connection.");
 			if (p.catalog?.[capability(role)] && !p.catalog[capability(role)].includes(r.model))
 				throw new Error(`${ROLES[role]}: this model is not listed for that capability. Test the connection again to refresh models.`);
@@ -160,12 +176,18 @@ export function validateRoutes(data) {
 }
 export function roleRoute(data, role) {
 	if (!Object.hasOwn(ROLES, role)) throw new Error("Unknown job.");
-	const route = data.roles?.[role] ?? (role === "background" ? data.roles?.main : null);
+	const route = data.roles?.[role] ?? (role === "background" ? data.roles?.main : role === "decide" ? defaultDecideRoute(data) : null);
 	if (!route) return null;
 	const p = (data.providers ?? []).find((p) => p.id === route.provider);
-	if (!p || !p.capabilities.includes(capability(role)) || (role === "local" && !p.local))
+	if (!serves(p, role) || (role === "local" && !p.local))
 		throw new Error("The job has an invalid provider configuration.");
 	return { ...route, connection: p };
+}
+/** Unset decisions follow the main conversation's connection when it is OpenRouter, with the default System One model. */
+function defaultDecideRoute(data) {
+	const main = data.roles?.main;
+	const p = (data.providers ?? []).find((p) => p.id === main?.provider);
+	return isOpenRouter(p) ? { provider: p.id, model: DECIDE_MODEL } : null;
 }
 export function publicSettings(data) {
 	return {
@@ -280,8 +302,18 @@ export async function runRole(data, role, payload, request = providerRequest, { 
 	if (!route) throw new Error(`No provider is configured for ${ROLES[role]}.`);
 	const attempt = async (r) => {
 		const provider = (data.providers ?? []).find((p) => p.id === r.provider);
-		if (!provider || !provider.capabilities.includes(capability(role)) || (role === "local" && !provider.local))
-			throw new Error("Invalid fallback connection.");
+		if (!serves(provider, role) || (role === "local" && !provider.local)) throw new Error("Invalid fallback connection.");
+		if (role === "decide") {
+			// Only the System One fields are forwarded: the caller cannot pick the model or loosen the routing.
+			const { state, questions, assets } = payload;
+			if (state === undefined || state === null || !questions || typeof questions !== "object" || Array.isArray(questions) || !Object.keys(questions).length)
+				throw new Error("A decision needs state and at least one question.");
+			return send(provider, "/systemone", {
+				method: "POST",
+				contentType: "application/json",
+				body: JSON.stringify({ model: r.model, state, questions, ...(assets ? { assets } : {}), provider: { zdr: true, data_collection: "deny" } }),
+			});
+		}
 		if (provider.format === "custom") {
 			const shape = provider.custom[capability(role)];
 			const response = await customRequest(provider, shape, customVariables(payload, r), send);

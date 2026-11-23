@@ -94,6 +94,7 @@ Your own workflows go in `data/packs/<name>/` and never leave your machine. To w
 
 - **Background tasks.** Only a task's final answer comes back to the conversation. Tasks cut off by a restart are reported on the next start.
 - **Failing scheduled jobs.** Transient errors wait for the next run. A real failure gets one repair attempt, then you are told once. A reminder that fails to send is retried for 10 minutes, then delivered marked late.
+- **Decisions.** Scripts and scheduled checks can ask `nano-decide` a typed question (yes/no, pick one, rate) about a file or stdin. It uses TypeSafe's Jev through OpenRouter, requires zero data retention, and costs a fraction of a model turn. Every decision is logged to `data/decisions.jsonl` with its probabilities, never its input. It is still a cloud call, so private material goes to `nano-local` instead.
 - **Private work.** Work marked private runs only on the local model and is refused without one, but its final answer goes through the main model, so keep private instructions narrow.
 - **Other programs can message you.** Drop a `.txt` file (sent as is) or a `.json` file (`{"text": "...", "kind": "message" | "task"}`, where `task` hands the text to the agent as instructions) into `data/outbox/`. Write to a temporary name and rename it, so a half-written file is never read.
 
