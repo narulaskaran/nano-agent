@@ -73,3 +73,15 @@ test("an unsure or failed triage falls back to the regex", async () => {
 		assert.deepEqual(real.sent, []);
 	}
 });
+
+test("only a near-certain owner verdict skips the repair", async () => {
+	const unsure = setup({ kind: "owner", p: 0.85 }, "KeyError: price");
+	await unsure.tick(MINUTE);
+	assert.equal(unsure.repairs.length, 1, "0.85 is not enough to page the owner");
+	assert.deepEqual(unsure.sent, []);
+	assert.match(unsure.repairs[0]?.instructions as string, /rename it aside/);
+	const sure = setup({ kind: "owner", p: 0.95 }, "invalid_grant: Token has been expired or revoked");
+	await sure.tick(MINUTE);
+	assert.equal(sure.repairs.length, 0);
+	assert.equal(sure.sent.length, 1);
+});
