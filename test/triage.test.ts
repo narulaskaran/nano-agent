@@ -10,7 +10,11 @@ import { type BackgroundWork, Scheduler } from "../src/scheduler.ts";
 const MINUTE = Date.UTC(2026, 10, 14, 10, 0, 5);
 
 /** A scheduler whose failure triage answers `kind` with probability `p` (or fails), running a script that fails with `error`. */
-function setup(answer: { kind?: string; p?: number; fail?: boolean }, error: string, extra: { private?: boolean } = {}) {
+function setup(
+	answer: { kind?: string; p?: number; status?: number; throwError?: Error },
+	error: string,
+	extra: { private?: boolean } = {},
+) {
 	const dataDir = mkdtempSync(join(tmpdir(), "nano-triage-"));
 	mkdirSync(join(dataDir, "workspace"));
 	const sent: string[] = [];
@@ -18,7 +22,8 @@ function setup(answer: { kind?: string; p?: number; fail?: boolean }, error: str
 	let calls = 0;
 	const transport: Transport = async () => {
 		calls++;
-		if (answer.fail) return { status: 503, text: "down" };
+		if (answer.throwError) throw answer.throwError;
+		if (answer.status) return { status: answer.status, text: "error" };
 		const p = answer.p ?? 0.95;
 		const kind = answer.kind ?? "fixable";
 		const rest = ["transient", "fixable", "owner"].filter((k) => k !== kind);
@@ -62,8 +67,8 @@ test("a failure the decision calls fixable gets a repair, even when the regex ca
 	assert.equal(repairs.length, 1);
 });
 
-test("an unsure or failed triage falls back to the regex", async () => {
-	for (const answer of [{ kind: "owner", p: 0.5 }, { fail: true }]) {
+test("an unsure or non-transiently failed triage falls back to the regex", async () => {
+	for (const answer of [{ kind: "owner", p: 0.5 }, { status: 401 }]) {
 		const transient = setup(answer, "connection reset by peer");
 		await transient.tick(MINUTE);
 		assert.equal(transient.repairs.length, 0, "regex: transient waits");
@@ -71,6 +76,26 @@ test("an unsure or failed triage falls back to the regex", async () => {
 		await real.tick(MINUTE);
 		assert.equal(real.repairs.length, 1, "regex: not transient, repaired");
 		assert.deepEqual(real.sent, []);
+	}
+});
+
+test("a transiently unavailable triage waits instead of starting a repair", async () => {
+	const netError = new TypeError("fetch failed", { cause: Object.assign(new Error(""), { code: "ENETUNREACH" }) });
+	const cases = [
+		{ answer: { status: 502 }, error: "curl failed after 2 attempts: curl exit 7:" },
+		{ answer: { throwError: new Error("The provider service is unavailable") }, error: "RuntimeError: vault fetch failed rc=1" },
+		{ answer: { throwError: netError }, error: "curl failed after 2 attempts: curl exit 7:" },
+	];
+	for (const { answer, error } of cases) {
+		const { sent, repairs, tick } = setup(answer, error);
+		await tick(MINUTE);
+		assert.equal(repairs.length, 0, "waits on first failure while triage is down");
+		assert.deepEqual(sent, []);
+		await tick(MINUTE + 60_000);
+		assert.equal(repairs.length, 0, "waits on second failure while triage is down");
+		await tick(MINUTE + 120_000);
+		assert.equal(repairs.length, 1, "after TRANSIENT_RUNS, repairs as a lasting streak");
+		assert.deepEqual(sent, []);
 	}
 });
 

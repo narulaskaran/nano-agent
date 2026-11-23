@@ -7,7 +7,10 @@ import type { Transport } from "./decide.ts";
 import { type Gate, type GateSent, type GateVerdict, logGate, rememberSent, runGate, validateGate } from "./gate.ts";
 import { readJsonFile, writeJsonFile } from "./json-store.ts";
 import { isSilent } from "./tasks.ts";
+import { isTransient } from "./transient.ts";
 import { triageFailure } from "./triage.ts";
+
+export { isTransient };
 
 /**
  * What a job does when it fires:
@@ -96,11 +99,6 @@ export const TRANSIENT_RUNS = 3;
 export const TRANSIENT_MS = 60 * 60_000;
 /** After starting a repair, further failures stay quiet this long so the repair can finish. */
 export const REPAIR_GRACE_MS = 30 * 60_000;
-
-/** Errors that usually clear on their own: timeouts, network trouble, overloaded or rate-limited services. */
-export function isTransient(error: string): boolean {
-	return /timed out|timeout|ETIMEDOUT|could not resolve|connection (refused|reset)|ECONNRESET|ECONNREFUSED|ENOTFOUND|EAI_AGAIN|ENETUNREACH|EHOSTUNREACH|socket hang up|network|\b(408|429|500|502|503|504)\b|rate.?limit|too many requests|overloaded|temporarily|unavailable/i.test(error);
-}
 
 // Every part is evaluated (no short-circuit) so a malformed field throws even when an earlier part matches.
 function fieldMatches(field: string, value: number, min: number, max: number): boolean {
@@ -435,7 +433,7 @@ export class Scheduler {
 		const triage = job.private
 			? undefined
 			: await triageFailure({ name: job.name, kind: job.kind, error, source: `triage:${job.id}`, logPath: join(this.config.dataDir, "decisions.jsonl"), transport: this.options.decisionTransport });
-		if (triage) console.error(`nano: job ${job.id} (${job.name}) failure looks ${triage.kind} (${triage.p.toFixed(2)})`);
+		if (triage && triage.kind !== "unavailable") console.error(`nano: job ${job.id} (${job.name}) failure looks ${triage.kind} (${triage.p.toFixed(2)})`);
 		if (triage?.kind === "owner") {
 			// A repair cannot fix a login, an account or money, so the owner hears now instead of after a wasted repair.
 			try {
@@ -447,7 +445,7 @@ export class Scheduler {
 			}
 			return;
 		}
-		const transient = triage ? triage.kind === "transient" : isTransient(error);
+		const transient = triage ? triage.kind === "transient" || triage.kind === "unavailable" : isTransient(error);
 		const lasting = !transient || health.failures >= TRANSIENT_RUNS || now - (health.since ?? now) >= TRANSIENT_MS;
 		if (!lasting) return;
 		if (health.repairAt === undefined) {

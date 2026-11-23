@@ -1,6 +1,7 @@
 import { randomBytes } from "node:crypto";
 import { readJsonFile, writeJsonFile } from "./json-store.ts";
 import type { ModelRole } from "./models.ts";
+import { isTransient } from "./transient.ts";
 
 /**
  * Background tasks: self-contained work that runs in its own Pi session so the main
@@ -101,6 +102,9 @@ export function handBackPrompt(task: Task): string | undefined {
 	if (task.status === "failed") {
 		// A scheduled job's failure goes to the scheduler, which retries, repairs or tells the owner.
 		if (task.jobId) return undefined;
+		// A repair that died on a transient/provider outage should not trigger a hand-back turn that fails on the same outage;
+		// if the job keeps failing past REPAIR_GRACE_MS, the scheduler will escalate once.
+		if (task.repairOf && task.error && isTransient(task.error)) return undefined;
 		return `${head} failed: ${task.error ?? "unknown error"}\nTell the owner briefly, and offer to retry if it still matters.`;
 	}
 	return undefined;
