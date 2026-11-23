@@ -45,8 +45,8 @@ src/            the runtime (TypeScript, no build step)
   session.ts    Pi session setup shared by conversations and workers
   tasks.ts      background tasks: queue, limits, persistence, hand-back
   worker.ts     runs a background task in its own Pi session
-  models.ts     model runtime, local model provider, main/local/private choice
-  local.ts      one-shot local model calls (ask_local, nano-local)
+  models.ts     model runtime, provider routing, the private-work (zero data retention) rule
+  ask.ts        one-shot classification and extraction calls (ask_once)
   scheduler.ts  reminders, cron jobs, script monitors, outbox
   decide.ts     typed decisions from the decision model (nano-decide), with a log
   gate.ts       the gate on scheduled script output
@@ -55,7 +55,7 @@ src/            the runtime (TypeScript, no build step)
   tools.ts      tools added on top of Pi's built-ins
   task-tools.ts delegate and task management tools
   prompt.ts     system prompt assembly
-bin/            commands on PATH (nano-local)
+bin/            commands on PATH (nano-decide)
 prompts/        the standing prompt
 packs/<name>/   capabilities shipped with Nano
 templates/kb/   starter knowledge base for new installs

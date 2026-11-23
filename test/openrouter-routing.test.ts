@@ -27,7 +27,10 @@ test("OpenRouter providers are tried in the configured order; routing is unset b
 		assert.deepEqual(pinned.openRouterProviders, ["OpenInference", "Wafer"]);
 		const expected = { order: ["OpenInference", "Wafer"], allow_fallbacks: true };
 		assert.deepEqual(routing(getMainModel(pinned, runtime)), expected);
-		assert.deepEqual(routing(resolveModel(pinned, runtime, "main", false).model), expected);
+		assert.deepEqual(routing(resolveModel(pinned, runtime, false).model), expected);
+		// Private work keeps the order and requires zero data retention.
+		assert.deepEqual(routing(resolveModel(pinned, runtime, true).model), { ...expected, zdr: true, data_collection: "deny" });
+		assert.deepEqual(routing(resolveModel(plain, runtime, true).model), { zdr: true, data_collection: "deny" });
 		// The catalog model itself is not modified.
 		assert.equal(routing(runtime.getModel("openrouter", "deepseek/deepseek-v4.1-flash")), undefined);
 

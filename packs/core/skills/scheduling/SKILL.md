@@ -20,7 +20,7 @@ Use `cron`. Add `until` whenever there is a natural end (a trip date, a deadline
 For "tell me when X changes" (a price, a delivery status, a flight, a reply):
 1. Write a small script in the workspace that prints one line when the thing changed since last run and prints nothing otherwise. Keep its last-seen value in a state file next to it. Exit 0 whether or not anything changed. A non-zero exit means the check itself is broken (see "When a job fails").
 2. Schedule it with kind `script`, a `cron` interval that fits how fast the thing changes, and `until`.
-3. Use `then: "send"` when the script's line is already a good message. When the check needs judgement ("is this a real change?", "is this worth telling them?"), let the script ask `nano-decide` and print a fixed message only for the answer that matters, still with `then: "send"`. If unsure cases matter, use `then: "task"` instead and have the script print the material only when `nano-decide` exits 3 (unsure), so you judge just those. Use `then: "task"` for every run only when the reply itself needs writing. Private material goes to `nano-local` instead.
+3. Use `then: "send"` when the script's line is already a good message. When the check needs judgement ("is this a real change?", "is this worth telling them?"), let the script ask `nano-decide` and print a fixed message only for the answer that matters, still with `then: "send"`. If unsure cases matter, use `then: "task"` instead and have the script print the material only when `nano-decide` exits 3 (unsure), so you judge just those. Use `then: "task"` for every run only when the reply itself needs writing. A check on private material skips `nano-decide`: use `then: "task"` with `private: true`.
 4. Cancel it when the owner says it is resolved.
 
 ## Gated check: the script gathers, a decision decides
@@ -29,7 +29,7 @@ When whether to speak is a judgement ("is this new docket entry a ruling or just
 2. Schedule it with kind `script` and `gate: {notify: "<what is worth telling the owner>"}`. Use `then: "send"` when the facts read fine as they are, or `then: "task"` with `background: true` when a reply needs writing or a little research.
 3. The gate drops output that does not match `notify`, and anything the job already told the owner. When it is unsure or the decision fails, the output goes through as if there were no gate.
 4. For a check whose misses would hurt, start with `gate.shadow: true` for a few runs: the agent still sees everything, and `<data>/gate.jsonl` shows whether gate and agent agreed. Drop `shadow` once they do.
-Not for private material: the gate asks the decision model, which may be a cloud service. Private checks call `nano-local` in the script.
+Not for private material: the gate asks the decision model, which is not bound to zero data retention. Private checks use `then: "task"` with `private: true` and no gate.
 A script check costs nothing when nothing changed. Prefer it over a recurring `task` whenever the check can be mechanical.
 
 ## Project heartbeat

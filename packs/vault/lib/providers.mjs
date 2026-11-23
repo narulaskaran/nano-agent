@@ -20,7 +20,6 @@ import { resolveHost } from "./fetch.mjs";
 export const ROLES = {
 	main: "Main conversation",
 	background: "Background tasks",
-	local: "Private / local work",
 	stt: "Speech to text",
 	tts: "Text to speech",
 	decide: "Decisions",
@@ -46,7 +45,7 @@ export const PRESETS = {
 	openrouter: { name: "OpenRouter", baseUrl: "https://openrouter.ai/api/v1", format: "openai", capabilities: ["chat", "stt", "tts", "decide"] },
 	custom: { name: "", baseUrl: "", format: "openai", capabilities: ["chat"] },
 };
-const capability = (role) => (["main", "background", "local"].includes(role) ? "chat" : role);
+const capability = (role) => (["main", "background"].includes(role) ? "chat" : role);
 const isOpenRouter = (p) => {
 	try {
 		return p?.format === "openai" && new URL(p.baseUrl).hostname === "openrouter.ai";
@@ -180,7 +179,6 @@ export function validateRoutes(data) {
 						? "Decisions need a connection with typed decisions enabled."
 						: `${ROLES[role]} needs a connection that supports ${capability(role)}.`,
 				);
-			if (role === "local" && !p.local) throw new Error("Private work and its fallback must use a local connection.");
 			if (p.catalog?.[capability(role)] && !p.catalog[capability(role)].includes(r.model))
 				throw new Error(`${ROLES[role]}: this model is not listed for that capability. Test the connection again to refresh models.`);
 			if ((capability(role) === "chat" || ["openai", "anthropic"].includes(p.format)) && !r.model)
@@ -193,8 +191,7 @@ export function roleRoute(data, role) {
 	const route = data.roles?.[role] ?? (role === "background" ? data.roles?.main : role === "decide" ? defaultDecideRoute(data) : null);
 	if (!route) return null;
 	const p = (data.providers ?? []).find((p) => p.id === route.provider);
-	if (!serves(p, role) || (role === "local" && !p.local))
-		throw new Error("The job has an invalid provider configuration.");
+	if (!serves(p, role)) throw new Error("The job has an invalid provider configuration.");
 	return { ...route, connection: p };
 }
 /** Unset decisions follow the main conversation's connection when it is OpenRouter, with DECIDE_MODEL. */
@@ -214,7 +211,8 @@ export function publicSettings(data) {
 			catalogProvider:
 				p.format === "openai" ? ({ "api.deepseek.com": "deepseek", "openrouter.ai": "openrouter" }[new URL(p.baseUrl).hostname] ?? "") : "",
 		})),
-		roles: data.roles ?? {},
+		// Only current jobs: a route saved for a retired job (such as the old local role) is not published.
+		roles: Object.fromEntries(Object.entries(data.roles ?? {}).filter(([role]) => Object.hasOwn(ROLES, role))),
 	};
 }
 
@@ -316,7 +314,7 @@ export async function runRole(data, role, payload, request = providerRequest, { 
 	if (!route) throw new Error(`No provider is configured for ${ROLES[role]}.`);
 	const attempt = async (r) => {
 		const provider = (data.providers ?? []).find((p) => p.id === r.provider);
-		if (!serves(provider, role) || (role === "local" && !provider.local)) throw new Error("Invalid fallback connection.");
+		if (!serves(provider, role)) throw new Error("Invalid fallback connection.");
 		if (role === "decide") {
 			// Only the decision fields are forwarded: the caller cannot pick the model, the endpoint or the routing.
 			const { state, questions, assets } = payload;
@@ -359,6 +357,9 @@ export async function runRole(data, role, payload, request = providerRequest, { 
 		}
 		if (capability(role) === "chat") {
 			const { api_key, apiKey, base_url, baseUrl, ...input } = payload;
+			// Private work asks OpenRouter for zero data retention. A connection that would ignore that is never used for it, fallbacks included.
+			if (input.provider?.zdr === true && !isOpenRouter(provider))
+				throw new Error("This request requires zero data retention, which only an OpenRouter connection can guarantee.");
 			if (provider.format === "anthropic") {
 				const response = await send(provider, "/messages", {
 					method: "POST",

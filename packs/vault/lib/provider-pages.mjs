@@ -86,7 +86,7 @@ ${select("API format", "format", Object.entries(FORMATS), values.format || "open
 			),
 		)
 		.join("")}
-${check("Runs on my local network (required for private work)", "local", values.local, "Local endpoints use a literal private or loopback IP. Hosted endpoints require HTTPS.")}</fieldset></section>
+${check("Runs on my local network", "local", values.local, "Local endpoints use a literal private or loopback IP. Hosted endpoints require HTTPS.")}</fieldset></section>
 <section class="card panel"><h2>Authentication</h2>
 ${field(keyLabel, "key", "", { type: "password", autocomplete: "new-password", hint: keyHint })}
 ${editing ? check("Remove saved API key", "removeKey", false) : ""}
@@ -103,7 +103,6 @@ ${editing ? `<form class="danger-zone" method="post" action="/providers/delete">
 const ROLE_HELP = {
 	main: "Your everyday conversations.",
 	background: "Behind-the-scenes work. Follows the main conversation unless set.",
-	local: "Private work. Only local-network connections can be chosen.",
 	stt: "Turns voice messages into text.",
 	tts: "Speaks audio replies.",
 	decide: `Quick typed judgements (yes/no, pick one, rate) for scripts and checks, from a decision model (for example Jev on OpenRouter, or a self-hosted Clef server). Requests to OpenRouter always require zero data retention. Unset, it uses the main conversation's connection with ${DECIDE_MODEL} when that connection is OpenRouter.`,
@@ -111,15 +110,13 @@ const ROLE_HELP = {
 
 function routeFields(role, route, providers, fallback = false) {
 	const prefix = `${role}_${fallback ? "fallback_" : ""}`;
-	const cap = ["main", "background", "local"].includes(role) ? "chat" : role;
-	const available = providers.filter((p) => serves(p, role) && (role !== "local" || p.local));
+	const cap = ["main", "background"].includes(role) ? "chat" : role;
+	const available = providers.filter((p) => serves(p, role));
 	const none = available.length
 		? ""
-		: role === "local"
-			? "No local-network connection supports this yet. Add one under Providers."
-			: role === "decide"
-				? "No connection has typed decisions enabled. Add or edit one under Providers."
-				: "No connection supports this yet. Add one under Providers.";
+		: role === "decide"
+			? "No connection has typed decisions enabled. Add or edit one under Providers."
+			: "No connection supports this yet. Add one under Providers.";
 	const modelHint = fallback
 		? ""
 		: role === "decide"
@@ -136,7 +133,7 @@ const contextField = (prefix, route) =>
 	field("Context window (tokens)", `${prefix}contextWindow`, route?.contextWindow || 32768, { type: "number", extra: 'min="2048" max="10000000"' });
 
 function roleCard(role, label, route, providers) {
-	const chat = ["main", "background", "local"].includes(role);
+	const chat = ["main", "background"].includes(role);
 	const assigned = providers.find((p) => p.id === route?.provider);
 	const status = route?.provider
 		? `<span class="badge on">${esc(assigned?.name || route.provider)}${route.model ? ` · ${esc(route.model)}` : ""}</span>`
@@ -148,7 +145,7 @@ function roleCard(role, label, route, providers) {
 ${routeFields(role, route, providers)}
 <details${hasFallback ? " open" : ""}><summary>${chat ? "Context window &amp; fallback" : "Fallback"}${hasFallback ? ' <span class="badge on">Fallback set</span>' : ""}</summary>
 ${chat ? contextField(`${role}_`, route) : ""}
-<div class="sub"><h3>Fallback</h3><p class="hint">Content may be sent to the fallback if the primary is unavailable. Private work only allows local connections.</p>${routeFields(role, route?.fallback, providers, true)}${chat ? contextField(`${role}_fallback_`, route?.fallback) : ""}</div></details>
+<div class="sub"><h3>Fallback</h3><p class="hint">Content may be sent to the fallback if the primary is unavailable.</p>${routeFields(role, route?.fallback, providers, true)}${chat ? contextField(`${role}_fallback_`, route?.fallback) : ""}</div></details>
 </section>`;
 }
 

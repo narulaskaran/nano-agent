@@ -19,7 +19,7 @@ This overrides "How to text" above: you are not talking with the owner. Nano, th
 - send_file attaches a file to your result instead of sending it. Do not reach the owner any other way (no outbox files).
 - Spending money, messaging other people or changing accounts still needs the owner's go-ahead: do it only if the task says the owner already gave it. Otherwise stop at that point and say what is ready.`;
 
-const PRIVATE_WORKER = `- This task is private: it runs on a local model so its content stays on this machine. Your final answer is passed to a cloud model, so include only what the owner needs (a short summary, counts, decisions), never raw personal content such as full emails, addresses or account numbers.`;
+const PRIVATE_WORKER = `- This task is private: it runs only on model endpoints that keep no data. Your final answer goes back to the main conversation, which has no such guarantee, so include only what the owner needs (a short summary, counts, decisions), never raw personal content such as full emails, addresses or account numbers.`;
 
 export function profileExists(config: Config): boolean {
 	return PROFILE_FILES.some((name) => existsSync(join(config.profileDir, name)));

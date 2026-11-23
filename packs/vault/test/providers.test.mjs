@@ -63,15 +63,10 @@ test("changing destinations clears keys, and editing the same destination keeps 
 	assert.throws(() => saveProvider(data, form("cloud", { baseUrl: "https://user:pass@example.com" })), /credentials/);
 	assert.throws(() => saveProvider(data, form("cloud", { authHeader: "Host" })), /authentication header/);
 });
-test("private routes, local endpoints and fallbacks are validated before saving", () => {
+test("local endpoints and routes are validated before saving", () => {
 	let data = configured();
-	assert.throws(() => saveRoles(data, { local_provider: "cloud", local_model: "x" }), /local connection/);
 	assert.throws(() => saveProvider(data, form("local", { local: "yes", baseUrl: "http://localhost:8090/v1" })), /literal/);
 	data = saveProvider(data, form("local", { local: "yes", baseUrl: "http://127.0.0.1:8090/v1", key: "" }));
-	assert.throws(
-		() => saveRoles(data, { local_provider: "local", local_model: "x", local_fallback_provider: "cloud", local_fallback_model: "x" }),
-		/local connection/,
-	);
 	assert.throws(() => saveRoles(data, { stt_provider: "cloud", stt_model: "x" }), /supports stt/);
 	assert.throws(() => deleteProvider(data, "cloud"), /assigned/);
 	assert.throws(() => saveProvider(data, form("cloud", { cap_chat: undefined, cap_stt: "yes" })), /supports chat/);
@@ -93,6 +88,36 @@ test("caller model and destination overrides are not forwarded; background follo
 	assert.equal(seen.body.model, "owner-model");
 	assert.equal(seen.body.base_url, undefined);
 	assert.equal(seen.p.id, "cloud");
+});
+test("a route saved for the retired local role is neither published nor runnable", async () => {
+	const data = configured();
+	data.roles.local = { provider: "cloud", model: "old-local" };
+	assert.equal(publicSettings(data).roles.local, undefined);
+	assert.equal(publicSettings(data).roles.main.model, "owner-model");
+	await assert.rejects(runRole(data, "local", { messages: [] }, async () => ok({})), /Unknown job/);
+	assert.equal(saveRoles(data, { main_provider: "cloud", main_model: "owner-model" }).roles.local, undefined);
+});
+test("a zero-data-retention request never reaches a connection that cannot enforce it, fallbacks included", async () => {
+	let data = saveProvider(emptyStore(), form("or", { baseUrl: "https://openrouter.ai/api/v1" }));
+	data = saveProvider(data, form("other"));
+	data = saveRoles(data, { main_provider: "or", main_model: "a", main_fallback_provider: "other", main_fallback_model: "b" });
+	const zdr = { messages: [], provider: { zdr: true, data_collection: "deny" } };
+	let calls = [];
+	const down = async (p, _path, opts) => {
+		calls.push([p.id, JSON.parse(opts.body).provider]);
+		return { status: 503 };
+	};
+	await assert.rejects(runRole(data, "main", zdr, down), /zero data retention/);
+	assert.deepEqual(calls, [["or", zdr.provider]]);
+	// Ordinary work still falls back.
+	calls = [];
+	await runRole(data, "main", { messages: [] }, async (p) => (calls.push(p.id), p.id === "or" ? { status: 503 } : ok({})));
+	assert.deepEqual(calls, ["or", "other"]);
+	// A non-OpenRouter primary never sees private work; an OpenRouter fallback can take it.
+	data = saveRoles(data, { main_provider: "other", main_model: "b", main_fallback_provider: "or", main_fallback_model: "a" });
+	calls = [];
+	await runRole(data, "main", zdr, async (p) => (calls.push(p.id), ok({})));
+	assert.deepEqual(calls, ["or"]);
 });
 test("only an explicit fallback receives work, and authentication failures do not fall back", async () => {
 	let data = configured();

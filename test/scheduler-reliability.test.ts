@@ -154,7 +154,7 @@ test("a recovered job that the owner was never told about recovers silently", as
 });
 
 test("a repair that fixed the job stays silent; one that could not reaches the owner", () => {
-	const base = { id: "t1", title: 'Repair "feed"', instructions: "", role: "main", private: false, spaceId: "owner", source: "delegate", repairOf: "abc", createdAt: 0 } as const;
+	const base = { id: "t1", title: 'Repair "feed"', instructions: "", private: false, spaceId: "owner", source: "delegate", repairOf: "abc", createdAt: 0 } as const;
 	assert.equal(handBackPrompt({ ...base, status: "done", result: "FIXED: the page moved, updated the URL" }), undefined);
 	assert.match(handBackPrompt({ ...base, status: "done", result: "The feed now needs a login. Please sign in again." }) ?? "", /needs a login/);
 	assert.match(handBackPrompt({ ...base, status: "failed", error: "worker crashed" }) ?? "", /failed: worker crashed/);

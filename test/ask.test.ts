@@ -1,36 +1,26 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { type Config, loadLocalModel } from "../src/config.ts";
-import { ask, type ChatFn, fitInput, matchChoice } from "../src/local.ts";
-import { chooseModel } from "../src/models.ts";
+import type { Config } from "../src/config.ts";
+import { ask, type ChatFn, fitInput, matchChoice } from "../src/ask.ts";
+import { mainOnOpenRouter, privateRefusal } from "../src/models.ts";
 import { assertPrivateAllowed } from "../src/tools.ts";
 
-test("private work never falls back to the cloud model; plain local work does, and says so", () => {
-	assert.deepEqual(chooseModel("main", false, false), { use: "main" });
-	assert.deepEqual(chooseModel("local", false, true), { use: "local" });
-	assert.deepEqual(chooseModel("main", true, true), { use: "local" });
-	const fallback = chooseModel("local", false, false);
-	assert.ok("use" in fallback && fallback.use === "main" && fallback.note);
-	assert.ok("refuse" in chooseModel("local", true, false));
-	assert.ok("refuse" in chooseModel("main", true, false));
+const on = (modelProvider: string, mainCatalogProvider?: string) => ({ modelProvider, mainCatalogProvider }) as Config;
+
+test("private work needs the main model on OpenRouter, directly or through a vault connection", () => {
+	assert.equal(mainOnOpenRouter(on("openrouter")), true);
+	assert.equal(mainOnOpenRouter(on("nano-vault-main", "openrouter")), true);
+	assert.equal(mainOnOpenRouter(on("nano-vault-main", "deepseek")), false);
+	assert.equal(mainOnOpenRouter(on("nano-vault-main")), false);
+	assert.equal(mainOnOpenRouter(on("deepseek")), false);
+	assert.equal(privateRefusal(on("openrouter")), undefined);
+	assert.match(privateRefusal(on("deepseek")) ?? "", /zero data retention/);
 });
 
-test("private work is refused up front when there is no local model", () => {
-	const local = { modelId: "m", baseUrl: "http://127.0.0.1:8080/v1", contextWindow: 8192 };
-	assert.throws(() => assertPrivateAllowed({ local: undefined } as Config, true), /not run rather than sent to the cloud/);
-	assert.doesNotThrow(() => assertPrivateAllowed({ local } as Config, true));
-	assert.doesNotThrow(() => assertPrivateAllowed({ local: undefined } as Config, false));
-});
-
-test("the local role needs both a model and a base URL", () => {
-	assert.equal(loadLocalModel({}), undefined);
-	assert.equal(loadLocalModel({ NANO_LOCAL_MODEL: "m" }), undefined);
-	assert.deepEqual(loadLocalModel({ NANO_LOCAL_MODEL: "m", NANO_LOCAL_BASE_URL: "http://127.0.0.1:8080/v1/", NANO_LOCAL_CONTEXT: "65536" }), {
-		modelId: "m",
-		baseUrl: "http://127.0.0.1:8080/v1",
-		apiKey: undefined,
-		contextWindow: 65536,
-	});
+test("private work is refused up front when zero data retention cannot be required", () => {
+	assert.throws(() => assertPrivateAllowed(on("deepseek"), true), /was not run/);
+	assert.doesNotThrow(() => assertPrivateAllowed(on("openrouter"), true));
+	assert.doesNotThrow(() => assertPrivateAllowed(on("deepseek"), false));
 });
 
 test("choice answers are matched leniently but never guessed", () => {

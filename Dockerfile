@@ -16,7 +16,6 @@ COPY templates ./templates
 COPY bin ./bin
 COPY docker/entrypoint.sh /usr/local/bin/nano-entrypoint
 RUN chmod 755 /usr/local/bin/nano-entrypoint /app/bin/* \
- && ln -s /app/bin/nano-local /usr/local/bin/nano-local \
  && ln -s /app/bin/nano-decide /usr/local/bin/nano-decide \
  && for f in /app/packs/*/install.sh; do if [ -f "$f" ]; then bash "$f"; fi; done
 

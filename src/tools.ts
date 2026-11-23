@@ -4,37 +4,32 @@ import type { ExtensionFactory, ModelRuntime } from "@earendil-works/pi-coding-a
 import { Type } from "typebox";
 import type { Channel } from "./channel.ts";
 import { type Config, currentTimezone } from "./config.ts";
-import { ask, askLocal, type ChatFn } from "./local.ts";
-import { chooseModel, getMainModel } from "./models.ts";
+import { ask, type ChatFn } from "./ask.ts";
+import { getMainModel, privateRefusal } from "./models.ts";
 import { cronMatches, type Job, parseLocalTime, type Scheduler } from "./scheduler.ts";
 import { workspaceDir } from "./session.ts";
 
 export const text = (value: string) => ({ content: [{ type: "text" as const, text: value }], details: {} });
 
-export const ModelParam = Type.Optional(
-	Type.Union([Type.Literal("main"), Type.Literal("local")], {
-		description: 'Model to run on. "local": the owner\'s own local model (falls back to the main model if none is configured). Default "main".',
-	}),
-);
 export const PrivateParam = Type.Optional(
 	Type.Boolean({
-		description: "Sensitive content (emails, health, finances, documents): runs only on the local model and is refused if there is none. Only the final answer comes back to you.",
+		description: "Sensitive content (emails, health, finances, documents): runs only on endpoints that keep no data (zero data retention), and is refused if that cannot be guaranteed. Only the final answer comes back to you.",
 	}),
 );
 
-/** Refuse private work up front when it could only run on the cloud model. */
+/** Refuse private work up front when zero data retention cannot be required. */
 export function assertPrivateAllowed(config: Config, isPrivate: boolean | undefined): void {
-	const choice = chooseModel("local", Boolean(isPrivate), Boolean(config.local));
-	if ("refuse" in choice) throw new Error(choice.refuse);
+	const refusal = isPrivate ? privateRefusal(config) : undefined;
+	if (refusal) throw new Error(refusal);
 }
 
 const workspacePath = (config: Config, path: string) => (isAbsolute(path) ? path : join(workspaceDir(config), path));
 
-/** One-shot fallback on the main model, for non-private ask_local calls when no local model is configured. */
-function mainChat(config: Config, modelRuntime: ModelRuntime): ChatFn {
+/** One-shot calls on the main model for ask_once, with zero data retention required when private. */
+function mainChat(config: Config, modelRuntime: ModelRuntime, isPrivate: boolean): ChatFn {
 	return async (messages, extra, signal) => {
 		if (extra.response_format) return { status: 400, text: "constrained output not supported" };
-		const model = getMainModel(config, modelRuntime);
+		const model = getMainModel(config, modelRuntime, { private: isPrivate });
 		if (!model) return { status: 404, text: "main model not found" };
 		const [system, ...rest] = messages;
 		const reply = await modelRuntime.completeSimple(
@@ -69,7 +64,7 @@ function describeJob(job: Job, timeZone: string): string {
 	const when = job.at
 		? new Intl.DateTimeFormat("en-US", { timeZone, dateStyle: "medium", timeStyle: "short" }).format(job.at)
 		: `cron ${job.cron}${job.until ? ` until ${new Date(job.until).toISOString().slice(0, 10)}` : ""}`;
-	const background = job.background ? ` [background${job.private ? ", private" : job.model === "local" ? ", local" : ""}]` : "";
+	const background = job.background ? ` [background${job.private ? ", private" : ""}]` : "";
 	const gate = job.gate ? ` [gate${job.gate.shadow ? ", shadow" : ""}]` : "";
 	return `${job.id} | ${job.name} | ${job.kind}${job.then ? `->${job.then}` : ""}${background}${gate} | ${when} | ${describeHealth(job, timeZone)} | ${job.body.replace(/\s+/g, " ").slice(0, 120)}`;
 }
@@ -126,7 +121,6 @@ export function nanoTools(
 				until: Type.Optional(Type.String({ description: "For cron jobs: stop after this local time" })),
 				then: Type.Optional(Type.Union([Type.Literal("send"), Type.Literal("task")])),
 				background: Type.Optional(Type.Boolean()),
-				model: ModelParam,
 				private: PrivateParam,
 				gate: Type.Optional(
 					Type.Object({
@@ -143,11 +137,11 @@ export function nanoTools(
 				if (at !== undefined && at < Date.now() - 60_000) throw new Error(`That time is in the past (${params.at}, ${tz}).`);
 				const then = params.kind === "script" ? (params.then ?? "send") : undefined;
 				const usesAgent = params.kind === "task" || then === "task";
-				if ((params.background || params.model || params.private) && !usesAgent) {
-					throw new Error('background, model and private apply to kind "task" or a script with then "task".');
+				if ((params.background || params.private) && !usesAgent) {
+					throw new Error('background and private apply to kind "task" or a script with then "task".');
 				}
-				// Private or local work only makes sense off the main thread, which always runs on the main model.
-				const background = Boolean(params.background || params.private || params.model === "local");
+				// Private work runs off the main thread, whose model calls have no zero-data-retention guarantee.
+				const background = Boolean(params.background || params.private);
 				if (params.private) assertPrivateAllowed(config, true);
 				const job = scheduler.add({
 					name: params.name,
@@ -158,7 +152,7 @@ export function nanoTools(
 					cron: params.cron,
 					until: params.until ? parseLocalTime(params.until, tz) : undefined,
 					spaceId,
-					...(background ? { background, model: params.model, private: params.private || undefined } : {}),
+					...(background ? { background, private: params.private || undefined } : {}),
 					...(params.gate ? { gate: params.gate } : {}),
 				});
 				return text(`Scheduled: ${describeJob(job, tz)}`);
@@ -214,12 +208,12 @@ export function nanoTools(
 		});
 
 		pi.registerTool({
-			name: "ask_local",
-			label: "Ask local model",
+			name: "ask_once",
+			label: "Ask once",
 			description: [
-				"One-shot classification or extraction on the owner's local model, over a text or a file, without loading that content into this conversation. Returns only the short answer.",
+				"One-shot classification or extraction on the main model, over a text or a file, without loading that content into this conversation. Returns only the short answer.",
 				"Use it for sorting, tagging, yes/no checks and pulling a few fields out of sensitive or bulky material (emails, documents, logs). Give `choices` to get exactly one label back.",
-				"Private by default: with no local model configured it refuses. Pass private: false to allow a one-shot call to the main model instead.",
+				"Private by default: it runs only with zero data retention required, and refuses when that cannot be guaranteed. Pass private: false for material that is not sensitive.",
 			].join("\n"),
 			parameters: Type.Object({
 				instruction: Type.String({ description: "What to decide or extract, e.g. 'Is this email a bill that needs paying?'" }),
@@ -231,11 +225,9 @@ export function nanoTools(
 			async execute(_id, params, signal) {
 				const input = params.path ? readFileSync(workspacePath(config, params.path), "utf8") : params.text;
 				const options = { instruction: params.instruction, input, choices: params.choices, signal };
-				if (config.local) return text(await askLocal(config.local, options));
-				const choice = chooseModel("local", params.private ?? true, false);
-				if ("refuse" in choice) throw new Error(choice.refuse);
-				const answer = await ask(mainChat(config, extra.modelRuntime), options, 64_000);
-				return text(`${answer}\n(${choice.note})`);
+				const isPrivate = params.private ?? true;
+				assertPrivateAllowed(config, isPrivate);
+				return text(await ask(mainChat(config, extra.modelRuntime, isPrivate), options, 64_000));
 			},
 		});
 

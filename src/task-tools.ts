@@ -1,9 +1,8 @@
 import type { ExtensionFactory } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import type { Config } from "./config.ts";
-import { chooseModel } from "./models.ts";
 import { describeTask, type TaskManager } from "./tasks.ts";
-import { assertPrivateAllowed, ModelParam, PrivateParam, text } from "./tools.ts";
+import { assertPrivateAllowed, PrivateParam, text } from "./tools.ts";
 
 /** Tools for the main conversation to hand work to background workers. Workers do not get these. */
 export function taskTools(config: Config, tasks: TaskManager, spaceId: string): ExtensionFactory {
@@ -19,24 +18,20 @@ export function taskTools(config: Config, tasks: TaskManager, spaceId: string): 
 			parameters: Type.Object({
 				title: Type.String({ description: "Short label, e.g. 'Compare flights to Lisbon'" }),
 				instructions: Type.String({ description: "Complete standalone instructions for the worker" }),
-				model: ModelParam,
 				private: PrivateParam,
 			}),
 			async execute(_id, params) {
 				assertPrivateAllowed(config, params.private);
-				const choice = chooseModel(params.model ?? "main", Boolean(params.private), Boolean(config.local));
 				const task = tasks.start({
 					title: params.title,
 					instructions: params.instructions,
-					role: params.model ?? "main",
 					private: Boolean(params.private),
 					spaceId,
 					source: "delegate",
 				});
 				const waiting = task.status === "queued" ? ` It is queued behind ${config.maxTasks} running task(s).` : "";
-				const note = "note" in choice && choice.note ? ` ${choice.note}` : "";
 				return text(
-					`Started background task ${task.id}.${waiting}${note} The result will arrive here as a message. ` +
+					`Started background task ${task.id}.${waiting} The result will arrive here as a message. ` +
 						"If you have not yet told the owner you are on it, do so in one short line; otherwise write nothing more now. Do not mention the task id.",
 				);
 			},

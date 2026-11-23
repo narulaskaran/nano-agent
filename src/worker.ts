@@ -34,9 +34,10 @@ export function createWorkerRunner(deps: { config: Config; modelRuntime: ModelRu
 	const { config, modelRuntime, scheduler } = deps;
 	return async (task, signal, update) => {
 		await refreshProviderSettings(config, modelRuntime);
-		const chosen = resolveModel(config, modelRuntime, task.role, task.private);
-		const background = task.role === "main" && !task.private && config.background ? modelRuntime.getModel(config.background.provider, config.background.modelId) : undefined;
-		const { model, label, note } = background ? { model: background, label: `background ${background.id}`, note: undefined } : chosen;
+		const chosen = resolveModel(config, modelRuntime, task.private);
+		// Private work stays on the main model, where zero data retention is required; the background model may be anything.
+		const background = !task.private && config.background ? modelRuntime.getModel(config.background.provider, config.background.modelId) : undefined;
+		const { model, label } = background ? { model: background, label: `background ${background.id}` } : chosen;
 		update({ model: label });
 		const out = bufferedChannel();
 		const session = await createNanoSession({
@@ -72,7 +73,7 @@ export function createWorkerRunner(deps: { config: Config; modelRuntime: ModelRu
 			if (lastError) throw new Error(`model error: ${lastError.slice(0, 300)}`);
 			const answer = session.getLastAssistantText()?.trim() ?? "";
 			const sent = out.texts.length > 0 ? `\n\n(Messages the task tried to send: ${out.texts.join(" / ").slice(0, 1000)})` : "";
-			return { text: answer + sent, files: out.files, model: label, note };
+			return { text: answer + sent, files: out.files, model: label };
 		} finally {
 			signal.removeEventListener("abort", stop);
 			unsubscribe();

@@ -2,10 +2,9 @@ import { join } from "node:path";
 import { Conversation, StateStore } from "./agent.ts";
 import { type Channel, createPhotonChannel, createStdinChannel } from "./channel.ts";
 import { currentTimezone, loadConfig, startTimezoneSync } from "./config.ts";
-import { createModelRuntime, LOCAL_PROVIDER } from "./models.ts";
+import { createModelRuntime, mainOnOpenRouter } from "./models.ts";
 import { extendPath, skillPaths } from "./packs.ts";
 import { profileExists } from "./prompt.ts";
-import { providerFetch } from "./provider-client.ts";
 import { Scheduler } from "./scheduler.ts";
 import { TaskManager } from "./tasks.ts";
 import { createWorkerRunner } from "./worker.ts";
@@ -26,7 +25,7 @@ async function main(): Promise<void> {
 	}
 
 	console.error(
-		`nano: model ${config.modelProvider}/${config.modelId}, local ${config.local ? `${config.local.modelId} at ${config.local.baseUrl}` : "none"}, ` +
+		`nano: model ${config.modelProvider}/${config.modelId}, private work ${mainOnOpenRouter(config) ? "zero data retention" : "off (main model is not on OpenRouter)"}, ` +
 			`timezone ${currentTimezone(config)}, packs [${config.packs.join(", ")}], skill dirs ${skillPaths(config).length}, ` +
 			`profile ${profileExists(config) ? "found" : "missing (first-run onboarding)"}, kb ${config.kbDir}`,
 	);
@@ -36,13 +35,6 @@ async function main(): Promise<void> {
 		const available = await modelRuntime.getAllAvailable(config.modelProvider);
 		if (!available.some((m) => m.id === config.modelId)) {
 			throw new Error(`No credentials for ${config.modelProvider}. Set its API key in .env (see .env.example).`);
-		}
-		if (config.local) {
-			if (!modelRuntime.getModel(config.local.vault ? "nano-vault-local" : LOCAL_PROVIDER, config.local.modelId)) throw new Error("The local model could not be registered.");
-			const response = await (config.local.vault ? providerFetch("/providers/config") : fetch(`${config.local.baseUrl}/models`, { signal: AbortSignal.timeout(5000) })).catch((error: Error) => error);
-			if (response instanceof Error || !response.ok) {
-				throw new Error(`Local model endpoint ${config.local.baseUrl} is not reachable (${response instanceof Error ? response.message : `HTTP ${response.status}`}).`);
-			}
 		}
 		console.error("nano: check ok");
 		return;
@@ -58,7 +50,6 @@ async function main(): Promise<void> {
 			tasks.start({
 				title: work.title,
 				instructions: work.instructions,
-				role: work.model ?? "main",
 				private: Boolean(work.private),
 				spaceId,
 				// A repair that could not fix the job speaks to the owner directly; a scheduled run may answer [silent].

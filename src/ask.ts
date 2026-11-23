@@ -1,9 +1,5 @@
-import { roleFetch } from "./provider-client.ts";
-import type { LocalModel } from "./config.ts";
-
 /**
- * One-shot classification and extraction calls, used by the `ask_local` tool and the `nano-local`
- * command. No Pi session: the input never enters a conversation, and only the short answer comes back.
+ * One-shot classification and extraction calls, used by the `ask_once` tool. No Pi session: the input never enters a conversation, and only the short answer comes back.
  */
 
 export interface AskOptions {
@@ -41,41 +37,6 @@ export function matchChoice(answer: string, choices: string[]): string | undefin
 export function fitInput(input: string, contextWindow: number): string {
 	const budget = Math.max(2000, (contextWindow - 1500) * 3);
 	return input.length > budget ? `${input.slice(0, budget)}\n[input cut at ${budget} of ${input.length} characters]` : input;
-}
-
-/**
- * Chat transport for the local model's OpenAI-compatible `/chat/completions`. One-shot answers skip
- * the model's thinking phase (`enable_thinking: false`, honoured by llama.cpp and vLLM chat templates);
- * a server that rejects the field is asked again without it.
- */
-export function localChat(local: LocalModel): ChatFn {
-	let noThinking = true;
-	const post = async (messages: ChatMessage[], extra: object, signal?: AbortSignal) => {
-		const response = await (local.vault ? roleFetch("local") : fetch)(`${local.baseUrl}/chat/completions`, {
-			method: "POST",
-			signal: signal ?? AbortSignal.timeout(120_000),
-			headers: { "content-type": "application/json", ...(local.apiKey ? { authorization: `Bearer ${local.apiKey}` } : {}) },
-			body: JSON.stringify({
-				model: local.modelId,
-				messages,
-				temperature: 0,
-				stream: false,
-				...(noThinking ? { chat_template_kwargs: { enable_thinking: false } } : {}),
-				...extra,
-			}),
-		});
-		return { status: response.status, raw: await response.text() };
-	};
-	return async (messages, extra, signal) => {
-		let out = await post(messages, extra, signal);
-		if (out.status === 400 && noThinking && /chat_template_kwargs|enable_thinking|unrecognized|unknown/i.test(out.raw)) {
-			noThinking = false;
-			out = await post(messages, extra, signal);
-		}
-		if (out.status !== 200) return { status: out.status, text: out.raw.slice(0, 300) };
-		const data = JSON.parse(out.raw) as { choices?: { message?: { content?: string | null } }[] };
-		return { status: 200, text: stripThinking(data.choices?.[0]?.message?.content ?? "") };
-	};
 }
 
 export async function ask(chat: ChatFn, options: AskOptions, contextWindow: number): Promise<string> {
@@ -118,8 +79,4 @@ export async function ask(chat: ChatFn, options: AskOptions, contextWindow: numb
 	const second = retry.status === 200 ? matchChoice(retry.text, labels) : undefined;
 	if (second) return second;
 	throw new Error(`model did not answer with one of ${labels.join(", ")} (said: ${(retry.text || plain.text).slice(0, 80)})`);
-}
-
-export function askLocal(local: LocalModel, options: AskOptions): Promise<string> {
-	return ask(localChat(local), options, local.contextWindow);
 }

@@ -72,18 +72,18 @@ In Docker, mount the file read-only, for example `-v /path/to/google_token.json:
 
 A refresh token that goes unused for about six months stops working. The skill has the agent schedule a weekly `script` job running `google auth check --quiet`. That command always uses the refresh token and makes one cheap call (the Gmail profile, or the calendar list). It prints nothing on success, and one line on failure. It exits 0 either way, so the scheduler delivers that line as is. A non-zero exit would count as a broken check and go to a repair attempt first, and an expired Google token needs the owner, not a repair.
 
-## Scripts and a local model (design note)
+## Scripts and private triage (design note)
 
-The runtime is getting a local-model role so bulk inbox triage can stay off cloud models. This pack does not do triage, but its output is meant to be piped:
+Bulk inbox triage should keep message bodies out of the main conversation. This pack does not do triage, but its output is meant to be piped:
 
 - `google gmail search '<query>' --format ids --max 500` prints one id per line on stdout. The next-page hint goes to stderr.
 - `google gmail read - --format json` reads ids from stdin (at most 50 per call; use `xargs -n 50` for more) and prints one JSON object per message: `id, threadId, flags, from, to, cc, date, subject, attachments, unsubscribe, body`. Bodies are capped by `--max-chars`.
 - `google gmail modify - --archive --read` takes ids from stdin as well.
 - The exit codes are 0 for success, 1 for errors and 2 for usage problems or a missing confirmation. Nothing is interactive, and errors go to stderr.
 
-A triage job can then stay entirely inside one `script`:
-`google gmail search 'in:inbox newer_than:1d' --format ids | google gmail read - --format json --max-chars 2000 | <local model> | ...`
-Only the job's final summary reaches the conversation, so message bodies never enter a cloud model's context.
+A triage job can gather in one `script` and hand the result to a private task (`then: "task"`, `private: true`):
+`google gmail search 'in:inbox newer_than:1d' --format ids | google gmail read - --format json --max-chars 2000`
+The private task runs only on endpoints with zero data retention, and only its final summary reaches the conversation.
 
 ## Tests
 

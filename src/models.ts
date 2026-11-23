@@ -1,13 +1,9 @@
 import { join } from "node:path";
 import type { Api, Model } from "@earendil-works/pi-ai";
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";
-import { refreshProviderSettings } from "./provider-settings.ts";
 import { type Config, MAX_OUTPUT_TOKENS } from "./config.ts";
-
-/** Pi provider id under which `NANO_LOCAL_*` is registered. */
-export const LOCAL_PROVIDER = "nano-local";
-
-export type ModelRole = "main" | "local";
+import { OPENROUTER_ZDR } from "./decide.ts";
+import { refreshProviderSettings } from "./provider-settings.ts";
 
 /**
  * Prefer these OpenRouter upstream providers (`NANO_OPENROUTER_PROVIDERS`), in order. Any other provider
@@ -17,11 +13,12 @@ export type ModelRole = "main" | "local";
  */
 export function withProviderOrder(config: Config, model: Model<Api>): Model<Api> {
 	if (model.provider !== "openrouter" || config.openRouterProviders.length === 0) return model;
+	return withRouting(model, { order: config.openRouterProviders, allow_fallbacks: true });
+}
+
+function withRouting(model: Model<Api>, routing: object): Model<Api> {
 	const compat = (model.compat ?? {}) as { openRouterRouting?: object };
-	return {
-		...model,
-		compat: { ...compat, openRouterRouting: { ...compat.openRouterRouting, order: config.openRouterProviders, allow_fallbacks: true } },
-	} as Model<Api>;
+	return { ...model, compat: { ...compat, openRouterRouting: { ...compat.openRouterRouting, ...routing } } } as Model<Api>;
 }
 
 /** The model with its reply ceiling lowered to MAX_OUTPUT_TOKENS. */
@@ -29,10 +26,34 @@ export function capOutput(model: Model<Api>): Model<Api> {
 	return model.maxTokens > MAX_OUTPUT_TOKENS ? { ...model, maxTokens: MAX_OUTPUT_TOKENS } : model;
 }
 
-/** The main model, with provider routing and the reply ceiling applied. */
-export function getMainModel(config: Config, runtime: ModelRuntime): Model<Api> | undefined {
+/** Whether the main model is served through OpenRouter, directly or through a vault connection. */
+export function mainOnOpenRouter(config: Config): boolean {
+	return config.modelProvider === "openrouter" || (config.modelProvider === "nano-vault-main" && config.mainCatalogProvider === "openrouter");
+}
+
+/**
+ * Why private work cannot run right now, or undefined when it can. The one place the privacy rule lives:
+ * private work runs only on the main model through OpenRouter with zero data retention required, so no
+ * upstream that keeps or trains on the request can serve it. Any other main model refuses rather than
+ * sending private material without that guarantee.
+ */
+export function privateRefusal(config: Config): string | undefined {
+	return mainOnOpenRouter(config)
+		? undefined
+		: "This work is marked private, and private work runs only through OpenRouter with zero data retention. The main model is not on OpenRouter, so it was not run.";
+}
+
+/** The model with OpenRouter's zero-data-retention routing required. Endpoints that keep data are never used. */
+export function withZeroRetention(model: Model<Api>): Model<Api> {
+	return withRouting(model, OPENROUTER_ZDR);
+}
+
+/** The main model, with provider routing and the reply ceiling applied, and zero data retention when private. */
+export function getMainModel(config: Config, runtime: ModelRuntime, { private: isPrivate = false } = {}): Model<Api> | undefined {
 	const model = runtime.getModel(config.modelProvider, config.modelId);
-	return model && capOutput(withProviderOrder(config, model));
+	if (!model) return undefined;
+	const routed = capOutput(withProviderOrder(config, model));
+	return isPrivate ? withZeroRetention(routed) : routed;
 }
 
 export async function createModelRuntime(config: Config): Promise<ModelRuntime> {
@@ -40,61 +61,17 @@ export async function createModelRuntime(config: Config): Promise<ModelRuntime> 
 		authPath: join(config.dataDir, "pi", "auth.json"),
 		modelsPath: join(config.dataDir, "pi", "models.json"),
 	});
-	if (config.local) {
-		const { modelId, baseUrl, contextWindow } = config.local;
-		runtime.registerProvider(LOCAL_PROVIDER, {
-			name: "Local",
-			baseUrl,
-			api: "openai-completions",
-			// Resolved from the environment at request time; local servers without auth ignore the dummy value.
-			apiKey: config.local.apiKey ? "$NANO_LOCAL_API_KEY" : "local",
-			models: [
-				{
-					id: modelId,
-					name: `Local ${modelId}`,
-					reasoning: false,
-					input: ["text"],
-					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-					contextWindow,
-					maxTokens: Math.min(8192, Math.floor(contextWindow / 4)),
-				},
-			],
-		});
-	}
 	await refreshProviderSettings(config, runtime);
 	return runtime;
 }
 
-/**
- * Which model a piece of work runs on. The one place the privacy rule lives:
- * - "local" work falls back to the main model when no local model is configured, and says so;
- * - private work never falls back. It runs locally or not at all, so private data cannot reach the cloud by accident.
- */
-export function chooseModel(
-	role: ModelRole,
-	isPrivate: boolean,
-	localConfigured: boolean,
-): { use: ModelRole; note?: string } | { refuse: string } {
-	if (role === "local" || isPrivate) {
-		if (localConfigured) return { use: "local" };
-		if (isPrivate) return { refuse: "This work is marked private and no local model is configured (NANO_LOCAL_MODEL), so it was not run rather than sent to the cloud model." };
-		return { use: "main", note: "No local model is configured, so this ran on the main model." };
+/** The model a worker runs on. Private work is refused unless zero data retention can be required. */
+export function resolveModel(config: Config, runtime: ModelRuntime, isPrivate: boolean): { model: Model<Api>; label: string } {
+	if (isPrivate) {
+		const refusal = privateRefusal(config);
+		if (refusal) throw new Error(refusal);
 	}
-	return { use: "main" };
-}
-
-export function resolveModel(
-	config: Config,
-	runtime: ModelRuntime,
-	role: ModelRole,
-	isPrivate: boolean,
-): { model: Model<Api>; label: string; note?: string } {
-	const choice = chooseModel(role, isPrivate, Boolean(config.local));
-	if ("refuse" in choice) throw new Error(choice.refuse);
-	const [provider, id] =
-		choice.use === "local" && config.local ? [config.local.vault ? "nano-vault-local" : LOCAL_PROVIDER, config.local.modelId] : [config.modelProvider, config.modelId];
-	const found = runtime.getModel(provider, id);
-	if (!found) throw new Error(`Unknown model ${provider}/${id}`);
-	const model = capOutput(withProviderOrder(config, found));
-	return { model, label: choice.use === "local" ? `local ${id}` : `${provider}/${id}`, note: choice.note };
+	const model = getMainModel(config, runtime, { private: isPrivate });
+	if (!model) throw new Error(`Unknown model ${config.modelProvider}/${config.modelId}`);
+	return { model, label: `${config.modelProvider}/${config.modelId}${isPrivate ? ", zero data retention" : ""}` };
 }

@@ -6,27 +6,23 @@ import { test } from "node:test";
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { loadConfig, MAX_OUTPUT_TOKENS } from "../src/config.ts";
 import { applyProviderSettings, type ProviderSettings } from "../src/provider-settings.ts";
-import { getMainModel, resolveModel } from "../src/models.ts";
+import { getMainModel, mainOnOpenRouter, resolveModel } from "../src/models.ts";
 
-test("owner settings replace main, local and background independently and restore environment defaults", async () => {
+test("owner settings replace main and background independently and restore environment defaults", async () => {
 	const dir = mkdtempSync(join(tmpdir(), "nano-role-settings-"));
 	try {
 		const config = loadConfig({
 			NANO_CHANNEL: "stdin",
 			NANO_DATA_DIR: dir,
 			NANO_MODEL: "deepseek/deepseek-flash",
-			NANO_LOCAL_MODEL: "original-local",
-			NANO_LOCAL_BASE_URL: "http://127.0.0.1:8090/v1",
 		});
 		const runtime = await ModelRuntime.create({ authPath: join(dir, "auth.json"), modelsPath: null, refreshOnCreate: false });
 		const settings: ProviderSettings = {
 			providers: [
-				{ id: "hosted", capabilities: ["chat"], local: false },
-				{ id: "local", capabilities: ["chat"], local: true },
+				{ id: "hosted", capabilities: ["chat"], local: false, catalogProvider: "openrouter" },
 			],
 			roles: {
 				main: { provider: "hosted", model: "main-fixture", contextWindow: 65536 },
-				local: { provider: "local", model: "local-fixture", contextWindow: 32768 },
 				background: { provider: "hosted", model: "task-fixture", contextWindow: 16384 },
 			},
 		};
@@ -34,8 +30,9 @@ test("owner settings replace main, local and background independently and restor
 		assert.equal(config.modelProvider, "nano-vault-main");
 		assert.equal(config.modelId, "main-fixture");
 		assert.equal(config.background?.modelId, "task-fixture");
-		assert.equal(config.local?.vault, true);
-		assert.equal(resolveModel(config, runtime, "local", true).model.id, "local-fixture");
+		// An OpenRouter connection in the vault can serve private work, with zero data retention required.
+		assert.equal(mainOnOpenRouter(config), true);
+		assert.deepEqual((resolveModel(config, runtime, true).model.compat as { openRouterRouting?: unknown }).openRouterRouting, { zdr: true, data_collection: "deny" });
 		const original = runtime.getModel(config.modelProvider, config.modelId);
 		applyProviderSettings(config, runtime, settings);
 		assert.deepEqual(runtime.getModel(config.modelProvider, config.modelId), original);
@@ -45,7 +42,8 @@ test("owner settings replace main, local and background independently and restor
 		applyProviderSettings(config, runtime, { providers: [], roles: {} });
 		assert.equal(config.modelProvider, "deepseek");
 		assert.equal(config.modelId, "deepseek-flash");
-		assert.equal(config.local?.modelId, "original-local");
+		assert.equal(mainOnOpenRouter(config), false);
+		assert.throws(() => resolveModel(config, runtime, true), /was not run/);
 		assert.equal(config.background, undefined);
 	} finally {
 		rmSync(dir, { recursive: true, force: true });
@@ -61,7 +59,7 @@ test("replies are capped so OpenRouter does not reserve a whole output allowance
 		assert.ok(catalog && catalog.maxTokens > MAX_OUTPUT_TOKENS);
 		// Direct OpenRouter model.
 		assert.equal(getMainModel(config, runtime)?.maxTokens, MAX_OUTPUT_TOKENS);
-		assert.equal(resolveModel(config, runtime, "main", false).model.maxTokens, MAX_OUTPUT_TOKENS);
+		assert.equal(resolveModel(config, runtime, false).model.maxTokens, MAX_OUTPUT_TOKENS);
 		// Model assigned in the vault portal, taking its limits from the catalog.
 		applyProviderSettings(config, runtime, {
 			providers: [{ id: "or", capabilities: ["chat"], local: false, catalogProvider: "openrouter" }],

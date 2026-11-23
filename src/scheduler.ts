@@ -38,7 +38,6 @@ export interface Job {
 	lastFired?: number;
 	/** Agent work (task, or script then task) runs in a background worker instead of the main conversation. */
 	background?: boolean;
-	model?: "main" | "local";
 	private?: boolean;
 	/** How the job's recent runs went. Kept in schedule.json so the failure policy survives restarts. */
 	health?: JobHealth;
@@ -75,7 +74,6 @@ export interface JobHealth {
 export interface BackgroundWork {
 	title: string;
 	instructions: string;
-	model?: "main" | "local";
 	private?: boolean;
 	/** The job this run belongs to; its outcome comes back through Scheduler.taskEnded. */
 	jobId?: string;
@@ -238,8 +236,8 @@ export class Scheduler {
 		if (input.cron) cronMatches(input.cron, new Date(), currentTimezone(this.config)); // validates
 		if (input.gate) {
 			if (input.kind !== "script") throw new Error('a gate judges script output, so it needs kind "script"');
-			// The decision model may be a cloud service; private material must not reach it.
-			if (input.private) throw new Error("a private job cannot have a gate: the decision model may be a cloud service");
+			// The decision model can be any service the owner configures; private output must not reach it.
+			if (input.private) throw new Error("a private job cannot have a gate: the decision model is not bound to zero data retention");
 			validateGate(input.gate);
 		}
 		const job: Job = { ...input, id: randomBytes(3).toString("hex"), createdAt: Date.now() };
@@ -452,7 +450,7 @@ export class Scheduler {
 			health.repairAt = now;
 			this.save();
 			try {
-				await this.sink.background(job.spaceId, { title: `Repair "${job.name}"`, instructions: repairPrompt(job, this.config.dataDir), model: job.model, private: job.private, repairOf: job.id });
+				await this.sink.background(job.spaceId, { title: `Repair "${job.name}"`, instructions: repairPrompt(job, this.config.dataDir), private: job.private, repairOf: job.id });
 				console.error(`nano: started a repair for job ${job.id} (${job.name})`);
 				return;
 			} catch (startError) {
@@ -476,7 +474,7 @@ export class Scheduler {
 		console.error(`nano: firing ${job.kind} job ${job.id} (${job.name})${job.background ? " in the background" : ""}`);
 		const agent = (prompt: string) =>
 			job.background
-				? this.sink.background(job.spaceId, { title: job.name, instructions: prompt, model: job.model, private: job.private, jobId: job.id })
+				? this.sink.background(job.spaceId, { title: job.name, instructions: prompt, private: job.private, jobId: job.id })
 				: this.sink.task(job.spaceId, prompt);
 		try {
 			if (job.kind === "message") {

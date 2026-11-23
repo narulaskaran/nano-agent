@@ -6,7 +6,7 @@ import { buildQuestion, decide, type DecisionRequest, top } from "./decide.ts";
 
 const USAGE = `usage: nano-decide [options] "<question>" [file]
 Asks the decision model one question about a file or stdin and prints the answer. Not for private
-material: the decision model may be a cloud service (use nano-local).
+material: the decision model is not bound to zero data retention.
 
   (default)                 yes/no question; prints yes or no
   --yes TEXT --no TEXT      optional: what yes and no mean

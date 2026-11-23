@@ -1,6 +1,5 @@
 import { randomBytes } from "node:crypto";
 import { readJsonFile, writeJsonFile } from "./json-store.ts";
-import type { ModelRole } from "./models.ts";
 import { isTransient } from "./transient.ts";
 
 /**
@@ -15,8 +14,7 @@ export interface TaskSpec {
 	title: string;
 	/** Standalone instructions: the worker sees nothing else of the conversation. */
 	instructions: string;
-	role: ModelRole;
-	/** Private work runs on the local model or not at all. */
+	/** Private work runs only with zero data retention required (models.ts), or not at all. */
 	private: boolean;
 	spaceId: string;
 	/** "schedule": started by a background scheduled job; a [silent] result is dropped. */
@@ -119,7 +117,7 @@ export function describeTask(task: Task, now = Date.now()): string {
 	const since = task.startedAt ?? task.createdAt;
 	const minutes = Math.round(((task.endedAt ?? now) - since) / 60_000);
 	const outcome = task.status === "failed" ? ` | ${task.error}` : task.status === "done" ? ` | ${(task.result ?? "").replace(/\s+/g, " ").slice(0, 200)}` : "";
-	return `${task.id} | ${task.status} | ${task.title} | ${task.model ?? task.role}${task.private ? ", private" : ""} | ${minutes} min${outcome}`;
+	return `${task.id} | ${task.status} | ${task.title} | ${task.model ?? "main"}${task.private ? ", private" : ""} | ${minutes} min${outcome}`;
 }
 
 export class TaskManager {

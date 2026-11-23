@@ -11,7 +11,7 @@ interface Route {
 }
 export interface ProviderSettings {
 	providers: { id: string; local: boolean; capabilities: string[]; catalogProvider?: string }[];
-	roles: Partial<Record<"main" | "background" | "local", Route>>;
+	roles: Partial<Record<"main" | "background", Route>>;
 }
 /**
  * The vault daemon forwards only the request body, so the `x-session-id` header Pi sends is lost before
@@ -30,7 +30,7 @@ export function withBodySessionId<T extends { sessionId?: string; onPayload?: (p
 	};
 }
 
-const states = new WeakMap<Config, { signature: string; main: [string, string]; local: Config["local"] }>();
+const states = new WeakMap<Config, { signature: string; main: [string, string] }>();
 
 /** Read metadata each turn. Endpoint and key selection remain inside the daemon. */
 export async function refreshProviderSettings(config: Config, runtime: ModelRuntime): Promise<void> {
@@ -45,18 +45,17 @@ export async function refreshProviderSettings(config: Config, runtime: ModelRunt
 export function applyProviderSettings(config: Config, runtime: ModelRuntime, settings: ProviderSettings): void {
 	let state = states.get(config);
 	if (!state) {
-		state = { signature: "", main: [config.modelProvider, config.modelId], local: config.local };
+		state = { signature: "", main: [config.modelProvider, config.modelId] };
 		states.set(config, state);
 	}
 	const signature = JSON.stringify(settings);
 	if (signature === state.signature) return;
 	const roles = { ...settings.roles, background: settings.roles.background ?? settings.roles.main };
-	for (const role of ["main", "background", "local"] as const) {
+	for (const role of ["main", "background"] as const) {
 		const route = roles[role];
 		if (!route) continue;
 		const connection = settings.providers.find((p) => p.id === route.provider);
-		if (!connection?.capabilities.includes("chat") || (role === "local" && !connection.local))
-			throw new Error("Invalid provider role settings");
+		if (!connection?.capabilities.includes("chat")) throw new Error("Invalid provider role settings");
 		const provider = `nano-vault-${role}`;
 		const contextWindow = route.contextWindow || 32768;
 		const source = connection.catalogProvider ? runtime.getModel(connection.catalogProvider, route.model) : undefined;
@@ -88,14 +87,7 @@ export function applyProviderSettings(config: Config, runtime: ModelRuntime, set
 	}
 	[config.modelProvider, config.modelId] = settings.roles.main ? ["nano-vault-main", settings.roles.main.model] : state.main;
 	config.background = roles.background ? { provider: "nano-vault-background", modelId: roles.background.model } : undefined;
-	config.local = settings.roles.local
-		? {
-				modelId: settings.roles.local.model,
-				baseUrl: "http://nano-vault/local",
-				contextWindow: settings.roles.local.contextWindow || 32768,
-				vault: true,
-			}
-		: state.local;
+	config.mainCatalogProvider = settings.roles.main ? settings.providers.find((p) => p.id === settings.roles.main?.provider)?.catalogProvider : undefined;
 	config.providerRevision = signature;
 	state.signature = signature;
 }

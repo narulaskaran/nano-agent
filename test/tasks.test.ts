@@ -9,7 +9,6 @@ import { handBackPrompt, type Task, TaskManager, type TaskResult, type TaskRunne
 const spec = (title: string, extra: Partial<TaskSpec> = {}): TaskSpec => ({
 	title,
 	instructions: `do ${title}`,
-	role: "main",
 	private: false,
 	spaceId: "space",
 	source: "delegate",

@@ -7,15 +7,15 @@ import { providerFetch, providerSettingsAvailable } from "./provider-client.ts";
  * Typed decisions from the decision model: any endpoint that speaks the System One API (`{model, state,
  * questions}` in, answers out), for example Jev on OpenRouter or a self-hosted Clef server.
  * One forward pass returns probabilities for declared answers instead of generated text, so code can
- * branch on them. Requests to OpenRouter always require zero data retention. The endpoint may be a
- * cloud service, so private material belongs with the local model (see local.ts).
+ * branch on them. Requests to OpenRouter always require zero data retention. The endpoint may be any
+ * service the owner configures, so scheduled jobs marked private never send their output here.
  */
 
 /** The decision model used with an OpenRouter key when no decision endpoint is set. */
 export const DECIDE_MODEL = "typesafe/jev-1.14";
 const OPENROUTER_DECISIONS = "https://openrouter.ai/api/v1/systemone";
-/** OpenRouter's routing for decisions: zero data retention, no training on the request. */
-const OPENROUTER_ZDR = { zdr: true, data_collection: "deny" };
+/** OpenRouter's routing for decisions and private work: zero data retention, no training on the request. */
+export const OPENROUTER_ZDR = { zdr: true, data_collection: "deny" };
 const LOG_MAX_BYTES = 5 * 1024 * 1024;
 
 export type Question =
