@@ -533,9 +533,11 @@ export class Conversation {
 			if (event.type !== "message_end" || event.message.role !== "assistant") return;
 			// A cancelled reply is never sent, not even the part already written.
 			if (event.message.stopReason === "aborted") return;
-			if (run) run.phase = event.message.content.some((c) => c.type === "toolCall") ? "tools" : "done";
+			const hasToolCall = event.message.content.some((c) => c.type === "toolCall");
+			if (run) run.phase = hasToolCall ? "tools" : "done";
 			const { text, error } = assistantText(event.message);
-			if (text) void this.say(text);
+			// System turns (scheduled jobs, outbox tasks, task hand-backs) may narrate a tool call before replying [silent].
+			if (text && !(run?.from === "system" && hasToolCall)) void this.say(text);
 			else if (error) void this.say(`I hit an error talking to the model: ${error.slice(0, 200)}`);
 		});
 		this.session = session;
