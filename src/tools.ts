@@ -70,7 +70,8 @@ function describeJob(job: Job, timeZone: string): string {
 		? new Intl.DateTimeFormat("en-US", { timeZone, dateStyle: "medium", timeStyle: "short" }).format(job.at)
 		: `cron ${job.cron}${job.until ? ` until ${new Date(job.until).toISOString().slice(0, 10)}` : ""}`;
 	const background = job.background ? ` [background${job.private ? ", private" : job.model === "local" ? ", local" : ""}]` : "";
-	return `${job.id} | ${job.name} | ${job.kind}${job.then ? `->${job.then}` : ""}${background} | ${when} | ${describeHealth(job, timeZone)} | ${job.body.replace(/\s+/g, " ").slice(0, 120)}`;
+	const gate = job.gate ? ` [gate${job.gate.shadow ? ", shadow" : ""}]` : "";
+	return `${job.id} | ${job.name} | ${job.kind}${job.then ? `->${job.then}` : ""}${background}${gate} | ${when} | ${describeHealth(job, timeZone)} | ${job.body.replace(/\s+/g, " ").slice(0, 120)}`;
 }
 
 /** Health column of schedule_list, so a broken job is visible without reading logs. */
@@ -114,6 +115,7 @@ export function nanoTools(
 				'kind "script": run `body` as a shell command. No output means nothing is sent. Output is sent as is (then "send") or handed to you to judge (then "task"). Use for cheap monitors that should only speak on change.',
 				"Give exactly one of `at` (one time, owner's local time like 2026-11-12T09:00) or `cron` (five fields, owner's local time).",
 				"`background: true` (task, or script with then \"task\"): the work runs in a separate background session so it never blocks chatting; only its final answer comes back to you to pass on, and [silent] still means nothing is sent. Use it for slow jobs (research, browsing, many tool calls). `model` and `private` choose where it runs.",
+				'`gate` (script only, not private): a decision model reads the output first and only lets it through (to "send" or "task") when it matches `gate.notify`; it also drops what this job already told the owner. Unsure or failed decisions let it through. `gate.shadow: true` logs the decision without acting on it.',
 			].join("\n"),
 			parameters: Type.Object({
 				name: Type.String({ description: "Short label, e.g. 'Return shoes'" }),
@@ -126,6 +128,13 @@ export function nanoTools(
 				background: Type.Optional(Type.Boolean()),
 				model: ModelParam,
 				private: PrivateParam,
+				gate: Type.Optional(
+					Type.Object({
+						notify: Type.String({ description: "What makes the output worth telling the owner, e.g. 'a new court ruling, deadline or claim form'" }),
+						shadow: Type.Optional(Type.Boolean({ description: "Log decisions only; act as if ungated" })),
+						min: Type.Optional(Type.Number({ description: "Stay quiet only when quiet is at least this likely (default 0.8)" })),
+					}),
+				),
 			}),
 			async execute(_id, params) {
 				const tz = currentTimezone(config);
@@ -150,6 +159,7 @@ export function nanoTools(
 					until: params.until ? parseLocalTime(params.until, tz) : undefined,
 					spaceId,
 					...(background ? { background, model: params.model, private: params.private || undefined } : {}),
+					...(params.gate ? { gate: params.gate } : {}),
 				});
 				return text(`Scheduled: ${describeJob(job, tz)}`);
 			},

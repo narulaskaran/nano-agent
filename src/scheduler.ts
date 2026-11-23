@@ -3,7 +3,10 @@ import { randomBytes } from "node:crypto";
 import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { type Config, currentTimezone } from "./config.ts";
+import type { Transport } from "./decide.ts";
+import { type Gate, type GateSent, type GateVerdict, logGate, rememberSent, runGate, validateGate } from "./gate.ts";
 import { readJsonFile, writeJsonFile } from "./json-store.ts";
+import { isSilent } from "./tasks.ts";
 
 /**
  * What a job does when it fires:
@@ -11,6 +14,8 @@ import { readJsonFile, writeJsonFile } from "./json-store.ts";
  * - task:    hand `body` to the agent as a prompt. It replies to the owner, or with [silent].
  * - script:  run `body` as a shell command. Empty output means nothing happens. Otherwise the
  *            output is sent as is (`then: "send"`) or handed to the agent (`then: "task"`).
+ *            With a `gate`, a decision model first judges whether the output is worth telling the
+ *            owner (see gate.ts); a confident "quiet" stops it there.
  */
 export interface Job {
 	id: string;
@@ -33,6 +38,15 @@ export interface Job {
 	private?: boolean;
 	/** How the job's recent runs went. Kept in schedule.json so the failure policy survives restarts. */
 	health?: JobHealth;
+	/** Script jobs only: a decision on the output before anything is sent or any agent runs. */
+	gate?: Gate;
+	/** What a gated job last told the owner, so the gate can drop repeats. */
+	gateSent?: GateSent[];
+}
+
+export interface SchedulerOptions {
+	/** How gate decisions are made; defaults to decide.ts's transport. For tests. */
+	decisionTransport?: Transport;
 }
 
 /**
@@ -196,10 +210,12 @@ export class Scheduler {
 	private badCron = new Set<string>();
 	private readonly config: Config;
 	private readonly sink: JobSink;
+	private readonly options: SchedulerOptions;
 
-	constructor(config: Config, sink: JobSink) {
+	constructor(config: Config, sink: JobSink, options: SchedulerOptions = {}) {
 		this.config = config;
 		this.sink = sink;
+		this.options = options;
 		this.path = join(config.dataDir, "schedule.json");
 		const stored = readJsonFile<{ jobs?: Job[] } | null>(this.path, null);
 		if (Array.isArray(stored?.jobs)) this.jobs = stored.jobs;
@@ -221,6 +237,12 @@ export class Scheduler {
 	add(input: Omit<Job, "id" | "createdAt">): Job {
 		if (!input.at && !input.cron) throw new Error("a job needs a time (at) or a schedule (cron)");
 		if (input.cron) cronMatches(input.cron, new Date(), currentTimezone(this.config)); // validates
+		if (input.gate) {
+			if (input.kind !== "script") throw new Error('a gate judges script output, so it needs kind "script"');
+			// The gate is a cloud decision; private material must not reach it.
+			if (input.private) throw new Error("a private job cannot have a gate: gate decisions are cloud calls");
+			validateGate(input.gate);
+		}
 		const job: Job = { ...input, id: randomBytes(3).toString("hex"), createdAt: Date.now() };
 		this.jobs.push(job);
 		this.save();
@@ -353,11 +375,20 @@ export class Scheduler {
 	}
 
 	/** A background run of a job ended (TaskManager calls this). Feeds the same failure policy as scripts. */
-	taskEnded(task: { jobId?: string; spaceId: string; title: string; status: string; error?: string }, now = Date.now()): void {
+	taskEnded(task: { jobId?: string; spaceId: string; title: string; status: string; error?: string; result?: string }, now = Date.now()): void {
 		if (!task.jobId) return;
 		const job = this.jobs.find((j) => j.id === task.jobId);
 		if (task.status === "done") {
 			if (job) this.succeeded(job, now);
+			if (job?.gate) {
+				// What the agent made of output the gate let through: the other half of the gate's record.
+				const told = !isSilent(task.result) && Boolean(task.result?.trim());
+				logGate(this.gateLogPath(), { job: job.id, agent: told ? "notify" : "quiet" });
+				if (told) {
+					job.gateSent = rememberSent(job.gateSent, task.result as string, now);
+					this.save();
+				}
+			}
 			return;
 		}
 		if (task.status !== "failed") return;
@@ -450,10 +481,17 @@ export class Scheduler {
 				}
 				this.succeeded(job, now);
 				if (!output) return;
+				if (job.gate) {
+					const verdict = await this.gate(job, output, now);
+					if (!verdict.notify && !job.gate.shadow) return;
+				}
 				if (job.then === "task") {
 					await agent(`Scheduled check "${job.name}" produced this output. Decide what, if anything, the owner needs to hear; if nothing, reply exactly [silent]:\n${output}`);
+					// A background run's answer is remembered when it ends (taskEnded); a main-conversation turn's is not visible here.
+					if (job.gate && !job.background) this.remember(job, output, now);
 				} else {
 					await this.sink.send(job.spaceId, labelScriptOutput(job.name, output));
+					if (job.gate) this.remember(job, output, now);
 				}
 			}
 		} catch (error) {
@@ -462,6 +500,37 @@ export class Scheduler {
 			console.error(`nano: job ${job.id} (${job.name}) could not be delivered:`, reason);
 			this.noteFailure(job, `delivery failed: ${reason}`, now);
 		}
+	}
+
+	/** Ask the gate about this output and log the verdict. Never throws: a failed gate lets the output through. */
+	private async gate(job: Job, output: string, now: number): Promise<GateVerdict> {
+		const gate = job.gate as Gate;
+		const verdict: GateVerdict = job.private
+			? { notify: true, p: 0, answer: "error", error: "private job: not sent to the gate" }
+			: await runGate({
+					name: job.name,
+					output,
+					gate,
+					sent: job.gateSent,
+					now,
+					timeZone: currentTimezone(this.config),
+					source: `gate:${job.id}`,
+					logPath: join(this.config.dataDir, "decisions.jsonl"),
+					transport: this.options.decisionTransport,
+				});
+		const action = verdict.notify ? "go" : gate.shadow ? "go (shadow)" : "quiet";
+		logGate(this.gateLogPath(), { job: job.id, gate: verdict.answer, p: Number(verdict.p.toFixed(3)), min: gate.min, shadow: gate.shadow || undefined, action, error: verdict.error, chars: output.length });
+		console.error(`nano: gate on job ${job.id} (${job.name}): ${verdict.answer}${verdict.p ? ` ${verdict.p.toFixed(2)}` : ""} -> ${action}${verdict.error ? ` (${verdict.error})` : ""}`);
+		return verdict;
+	}
+
+	private remember(job: Job, text: string, now: number): void {
+		job.gateSent = rememberSent(job.gateSent, text, now);
+		this.save();
+	}
+
+	private gateLogPath(): string {
+		return join(this.config.dataDir, "gate.jsonl");
 	}
 
 	private save(): void {

@@ -22,6 +22,14 @@ For "tell me when X changes" (a price, a delivery status, a flight, a reply):
 2. Schedule it with kind `script`, a `cron` interval that fits how fast the thing changes, and `until`.
 3. Use `then: "send"` when the script's line is already a good message. When the check needs judgement ("is this a real change?", "is this worth telling them?"), let the script ask `nano-decide` and print a fixed message only for the answer that matters, still with `then: "send"`. If unsure cases matter, use `then: "task"` instead and have the script print the material only when `nano-decide` exits 3 (unsure), so you judge just those. Use `then: "task"` for every run only when the reply itself needs writing. Private material goes to `nano-local` instead.
 4. Cancel it when the owner says it is resolved.
+
+## Gated check: the script gathers, a decision decides
+When whether to speak is a judgement ("is this new docket entry a ruling or just a filing?"), keep the script dumb and give the job a `gate` instead of calling `nano-decide` inside it:
+1. The script prints the facts (new entries, changed fields) and nothing when there is nothing new. It writes no messages.
+2. Schedule it with kind `script` and `gate: {notify: "<what is worth telling the owner>"}`. Use `then: "send"` when the facts read fine as they are, or `then: "task"` with `background: true` when a reply needs writing or a little research.
+3. The gate drops output that does not match `notify`, and anything the job already told the owner. When it is unsure or the decision fails, the output goes through as if there were no gate.
+4. For a check whose misses would hurt, start with `gate.shadow: true` for a few runs: the agent still sees everything, and `<data>/gate.jsonl` shows whether gate and agent agreed. Drop `shadow` once they do.
+Not for private material: the gate is a cloud call. Private checks call `nano-local` in the script.
 A script check costs nothing when nothing changed. Prefer it over a recurring `task` whenever the check can be mechanical.
 
 ## Project heartbeat
