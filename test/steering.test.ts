@@ -313,3 +313,39 @@ test("a text sent during a scheduled job is not steered into it; it gets its own
 	assert.match(seen[1] ?? "", /thanks for earlier/);
 	await nano.conversation.dispose();
 });
+
+test("a silent system turn does not send progress text that accompanies a tool call", async () => {
+	const nano = await scriptedConversation({ packs: "core" });
+	nano.script([
+		() => fauxAssistantMessage([fauxText("Checking the schedule first."), fauxToolCall("bash", { command: "true" })], { stopReason: "toolUse" }),
+		() => fauxAssistantMessage(fauxText("[silent]")),
+	]);
+	await nano.conversation.inject("silent scheduled task");
+	await noMoreReplies(nano);
+	await nano.conversation.dispose();
+});
+
+test("a system turn skips tool-call progress text and still delivers its final reply", async () => {
+	const nano = await scriptedConversation({ packs: "core" });
+	nano.script([
+		() => fauxAssistantMessage([fauxText("Checking the schedule first."), fauxToolCall("bash", { command: "true" })], { stopReason: "toolUse" }),
+		() => fauxAssistantMessage(fauxText("Restored the job.")),
+	]);
+	await nano.conversation.inject("reporting scheduled task");
+	assert.equal(await nano.next(), "Restored the job.");
+	await noMoreReplies(nano);
+	await nano.conversation.dispose();
+});
+
+test("an owner turn still delivers progress text sent alongside a tool call", async () => {
+	const nano = await scriptedConversation({ packs: "core" });
+	nano.script([
+		() => fauxAssistantMessage([fauxText("Checking that now."), fauxToolCall("bash", { command: "true" })], { stopReason: "toolUse" }),
+		() => fauxAssistantMessage(fauxText("All set.")),
+	]);
+	nano.say("check my schedule");
+	assert.equal(await nano.next(), "Checking that now.");
+	assert.equal(await nano.next(), "All set.");
+	await noMoreReplies(nano);
+	await nano.conversation.dispose();
+});
