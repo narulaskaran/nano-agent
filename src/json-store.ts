@@ -1,4 +1,5 @@
-import { existsSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
+import { dirname } from "node:path";
 
 /**
  * Read a JSON state file. Missing means `fallback`. Unreadable means the file is set aside as
@@ -23,4 +24,19 @@ export function writeJsonFile(path: string, data: unknown): void {
 	const tmp = `${path}.tmp`;
 	writeFileSync(tmp, JSON.stringify(data, null, 2));
 	renameSync(tmp, path);
+}
+
+/** Append one JSON line to a log, best effort. With `maxBytes`, a log over that size moves to `<path>.1` first. */
+export function appendJsonLine(path: string, entry: object, what: string, maxBytes?: number): void {
+	try {
+		mkdirSync(dirname(path), { recursive: true });
+		if (maxBytes !== undefined) {
+			try {
+				if (statSync(path).size > maxBytes) renameSync(path, `${path}.1`);
+			} catch {}
+		}
+		appendFileSync(path, `${JSON.stringify(entry)}\n`);
+	} catch (error) {
+		console.error(`nano: ${what} log not written:`, (error as Error)?.message ?? error);
+	}
 }

@@ -10,8 +10,6 @@ import { isSilent } from "./tasks.ts";
 import { isTransient } from "./transient.ts";
 import { triageFailure } from "./triage.ts";
 
-export { isTransient };
-
 /**
  * What a job does when it fires:
  * - message: send `body` to the owner as is. No model call.
@@ -276,7 +274,8 @@ export class Scheduler {
 			if (!/\.(txt|json)$/.test(name)) continue; // writers use a temp name, then rename
 			const path = join(dir, name);
 			if (this.outboxRunning.has(path)) continue;
-			if (durable && existsSync(path.replace(/\.(json|txt)$/, ".done"))) { rmSync(path); continue; }
+			const donePath = path.replace(/\.(json|txt)$/, ".done");
+			if (durable && existsSync(donePath)) { rmSync(path); continue; }
 			let item: { text?: string; kind?: string; to?: string };
 			try {
 				const raw = readFileSync(path, "utf8");
@@ -297,7 +296,7 @@ export class Scheduler {
 			try {
 				if (item.kind === "task") await this.sink.task(to, text);
 				else await this.sink.send(to, text);
-				if (durable) renameSync(path, path.replace(/\.(json|txt)$/, ".done"));
+				if (durable) renameSync(path, donePath);
 			} catch (error) {
 				console.error(`nano: outbox delivery failed for ${name}:`, (error as Error)?.message ?? error);
 			} finally {
@@ -383,10 +382,7 @@ export class Scheduler {
 				// What the agent made of output the gate let through: the other half of the gate's record.
 				const told = !isSilent(task.result) && Boolean(task.result?.trim());
 				logGate(this.gateLogPath(), { job: job.id, agent: told ? "notify" : "quiet" });
-				if (told) {
-					job.gateSent = rememberSent(job.gateSent, task.result as string, now);
-					this.save();
-				}
+				if (told) this.remember(job, task.result as string, now);
 			}
 			return;
 		}
@@ -436,14 +432,7 @@ export class Scheduler {
 		if (triage && triage.kind !== "unavailable") console.error(`nano: job ${job.id} (${job.name}) failure looks ${triage.kind} (${triage.p.toFixed(2)})`);
 		if (triage?.kind === "owner") {
 			// A repair cannot fix a login, an account or money, so the owner hears now instead of after a wasted repair.
-			try {
-				await this.sink.send(job.spaceId, `"${job.name}" is failing and needs you: ${(health.lastError ?? "").slice(0, 200)}. I will stay quiet about it until it works again.`);
-				health.escalated = true;
-				this.save();
-			} catch {
-				// Not delivered: the next failure tries again.
-			}
-			return;
+			return this.escalate(job, health, "is failing and needs you");
 		}
 		const transient = triage ? triage.kind === "transient" || triage.kind === "unavailable" : isTransient(error);
 		const lasting = !transient || health.failures >= TRANSIENT_RUNS || now - (health.since ?? now) >= TRANSIENT_MS;
@@ -463,8 +452,13 @@ export class Scheduler {
 			return;
 		}
 		const tried = health.repairAt !== undefined && now - health.repairAt >= REPAIR_GRACE_MS ? " and I could not fix it" : "";
+		await this.escalate(job, health, `keeps failing${tried}`);
+	}
+
+	/** Tell the owner once about a failing job; it stays quiet until it works again. */
+	private async escalate(job: Job, health: JobHealth, what: string): Promise<void> {
 		try {
-			await this.sink.send(job.spaceId, `"${job.name}" keeps failing${tried}: ${(health.lastError ?? "").slice(0, 200)}. I will stay quiet about it until it works again.`);
+			await this.sink.send(job.spaceId, `"${job.name}" ${what}: ${(health.lastError ?? "").slice(0, 200)}. I will stay quiet about it until it works again.`);
 			health.escalated = true;
 			this.save();
 		} catch {

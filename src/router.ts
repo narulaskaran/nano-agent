@@ -1,6 +1,5 @@
-import { appendFileSync, mkdirSync } from "node:fs";
-import { dirname } from "node:path";
 import { type Answer, decide, type DecisionRequest, top, type Transport } from "./decide.ts";
+import { appendJsonLine } from "./json-store.ts";
 
 /**
  * The inbound router: one decision from the decision model per owner message, before any model turn,
@@ -187,10 +186,5 @@ export async function route(input: RouteInput, options: { transport?: Transport;
 
 /** One line per routed message in <data>/router.jsonl: answers, probabilities and actions, never the text. */
 export function logRoute(path: string, entry: Record<string, unknown>): void {
-	try {
-		mkdirSync(dirname(path), { recursive: true });
-		appendFileSync(path, `${JSON.stringify({ at: new Date().toISOString(), ...entry })}\n`);
-	} catch (error) {
-		console.error("nano: router log not written:", (error as Error)?.message ?? error);
-	}
+	appendJsonLine(path, { at: new Date().toISOString(), ...entry }, "router");
 }

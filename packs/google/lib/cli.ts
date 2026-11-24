@@ -1,5 +1,6 @@
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
+import { setTimeout as sleep } from "node:timers/promises";
 import { Auth, type Capability, FULL_SCOPES, hasCapability, READ_ONLY_SCOPES } from "./auth.ts";
 import { calendarCommands } from "./calendar.ts";
 import { gmailCommands } from "./gmail.ts";
@@ -183,6 +184,6 @@ export function realIo(): Io {
 		err: (text) => process.stderr.write(`${text}\n`),
 		stdin: async () => (process.stdin.isTTY ? "" : readFileSync(0, "utf8")),
 		now: () => Date.now(),
-		sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+		sleep: (ms) => sleep(ms),
 	};
 }

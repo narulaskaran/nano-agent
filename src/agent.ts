@@ -10,7 +10,7 @@ import { getMainModel } from "./models.ts";
 import { refreshProviderSettings } from "./provider-settings.ts";
 import { packExtensions } from "./packs.ts";
 import { buildSystemPrompt } from "./prompt.ts";
-import { LONG_HINT, logRoute, REMEMBER_HINT, route, skillBlock, taskHint } from "./router.ts";
+import { LONG_HINT, logRoute, type RecentTurn, REMEMBER_HINT, route, skillBlock, taskHint } from "./router.ts";
 import type { Scheduler } from "./scheduler.ts";
 import { assistantText, createNanoSession } from "./session.ts";
 import { listSkills } from "./skills.ts";
@@ -18,16 +18,10 @@ import { taskTools } from "./task-tools.ts";
 import { isSilent, type TaskManager } from "./tasks.ts";
 import { nanoTools } from "./tools.ts";
 
-interface Turn {
-	role: "owner" | "nano";
-	text: string;
-	at: number;
-}
-
 interface SpaceState {
 	sessionFile?: string;
 	lastActivity: number;
-	recent: Turn[];
+	recent: RecentTurn[];
 }
 
 const BURST_MS = 1200;
@@ -57,7 +51,7 @@ export class StateStore {
 }
 
 /** Text of the turns just before an idle gap, so a fresh context window still knows what was being discussed. */
-export function carryOver(recent: Turn[], maxChars = CARRY_CHARS): string {
+export function carryOver(recent: RecentTurn[], maxChars = CARRY_CHARS): string {
 	const lines: string[] = [];
 	let used = 0;
 	for (const turn of [...recent].reverse()) {
@@ -326,7 +320,7 @@ export class Conversation {
 	 * Decide what an owner message needs before its turn (router.ts), then dispatch it. Only a message that would
 	 * start a turn of its own is routed: one that joins or waits behind a running turn keeps today's handling.
 	 */
-	private async routeOwner(work: Work & { from: "owner" }, before: { recent: Turn[]; lastActivity: number }, hasFiles: boolean): Promise<void> {
+	private async routeOwner(work: Work & { from: "owner" }, before: { recent: RecentTurn[]; lastActivity: number }, hasFiles: boolean): Promise<void> {
 		if (!this.router || this.run || this.queue.busy) return this.dispatch(work);
 		const now = Date.now();
 		const running = this.tasks.active().map((t) => ({ id: t.id, title: t.title }));
@@ -498,12 +492,11 @@ export class Conversation {
 		if (this.session) await this.dispose();
 
 		const resume = !idle && this.state.sessionFile && existsSync(this.state.sessionFile) ? this.state.sessionFile : undefined;
-		const model = getMainModel(this.config, this.modelRuntime);
-		if (!model) throw new Error(`Unknown model ${this.config.modelProvider}/${this.config.modelId}`);
+		if (!selected) throw new Error(`Unknown model ${this.config.modelProvider}/${this.config.modelId}`);
 		const session = await createNanoSession({
 			config: this.config,
 			modelRuntime: this.modelRuntime,
-			model,
+			model: selected,
 			systemPrompt: buildSystemPrompt(this.config),
 			extensionFactories: [
 				nanoTools(this.config, this.channel, this.scheduler, this.spaceId, { modelRuntime: this.modelRuntime }),
@@ -570,7 +563,7 @@ export class Conversation {
 		await this.say(`Something went wrong on my side: ${reason.slice(0, 200)}`);
 	}
 
-	private record(role: Turn["role"], text: string): void {
+	private record(role: RecentTurn["role"], text: string): void {
 		const at = Date.now();
 		this.state.lastActivity = at;
 		this.state.recent.push({ role, text: text.slice(0, 2000), at });
