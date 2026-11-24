@@ -13,6 +13,7 @@ import http from "node:http";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
+import { setTimeout as sleep } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { VAULT_RUN_DIR, VAULT_SOCKET } from "../../vault/lib/paths.mjs";
 
@@ -390,7 +391,7 @@ async function startDaemon() {
 	const log = openSync(join(STATE, "daemon.log"), "a");
 	spawn(process.execPath, [SELF, "--daemon"], { detached: true, stdio: ["ignore", log, log], env: process.env }).unref();
 	for (let i = 0; i < 100; i++) {
-		await new Promise((r) => setTimeout(r, 200));
+		await sleep(200);
 		if (await alive()) return;
 	}
 	throw new Error(`browser daemon did not start; see ${join(STATE, "daemon.log")}`);
@@ -413,7 +414,7 @@ async function client(argv) {
 			return 0;
 		}
 		if (vault) {
-			for (let i = 0; i < 50 && !(await alive()); i++) await new Promise((r) => setTimeout(r, 200));
+			for (let i = 0; i < 50 && !(await alive()); i++) await sleep(200);
 			if (!(await alive())) throw new Error("the vault browser is not running");
 		} else {
 			await startDaemon();
@@ -721,7 +722,7 @@ export function createBrowserHost(options = {}) {
 			await session.send("WebMCP.enable").catch(() => {});
 			await session.send("Page.getFrameTree").then((r) => walk(r.frameTree), () => {});
 		}
-		await new Promise((r) => setTimeout(r, 300));
+		await sleep(300);
 		return state;
 	}
 
@@ -741,7 +742,7 @@ export function createBrowserHost(options = {}) {
 				netLog.splice(0);
 				return "network log cleared";
 			}
-			await new Promise((r) => setTimeout(r, 300)); // let response bodies still being read land
+			await sleep(300); // let response bodies still being read land
 			return formatNetwork(netLog, { all: Boolean(flags.all), grep: typeof flags.grep === "string" ? flags.grep : "", last: flags.last });
 		},
 
@@ -1004,7 +1005,7 @@ export function createBrowserHost(options = {}) {
 			const params = { frameId: tool.frameId, input, ...(tool.toolId ? { toolId: tool.toolId } : { toolName: tool.name }) };
 			const { invocationId } = await tool.session.send("WebMCP.invokeTool", params);
 			const deadline = Date.now() + (Number(flags.timeout) * 1000 || 90_000);
-			while (!state.responses.has(invocationId) && Date.now() < deadline) await new Promise((r) => setTimeout(r, 200));
+			while (!state.responses.has(invocationId) && Date.now() < deadline) await sleep(200);
 			const response = state.responses.get(invocationId);
 			await settle(p, 3000);
 			if (!response) return `${name} was invoked${secret ? " with card data" : ""}; no response yet. Check the page with snapshot.`;

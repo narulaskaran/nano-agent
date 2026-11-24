@@ -1,6 +1,7 @@
 import { mkdirSync, writeFileSync } from "node:fs";
 import { basename, extname, join } from "node:path";
 import { createInterface } from "node:readline";
+import { setTimeout as sleep } from "node:timers/promises";
 import type { Config } from "./config.ts";
 
 export interface InboundFile {
@@ -378,7 +379,7 @@ export async function createPhotonChannel(config: Config): Promise<Channel> {
 					if (stopped) break;
 					console.error("nano: inbound stream error, re-subscribing:", (error as Error)?.message ?? error);
 				}
-				await new Promise((r) => setTimeout(r, backoff + Math.random() * backoff * 0.2));
+				await sleep(backoff + Math.random() * backoff * 0.2);
 				backoff = Math.min(backoff * 2, 30_000);
 			}
 		},

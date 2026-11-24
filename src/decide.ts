@@ -1,6 +1,5 @@
 import { createHash } from "node:crypto";
-import { appendFileSync, mkdirSync, renameSync, statSync } from "node:fs";
-import { dirname } from "node:path";
+import { appendJsonLine } from "./json-store.ts";
 import { providerFetch, providerSettingsAvailable } from "./provider-client.ts";
 
 /**
@@ -145,15 +144,20 @@ export async function decide(request: DecisionRequest, options: DecideOptions = 
 		}
 	}
 	if (options.logPath) {
-		logDecision(options.logPath, {
-			at: new Date(started).toISOString(),
-			ms: now() - started,
-			source: options.source,
-			model: parsed.model,
-			state: stateFingerprint(request.state),
-			answers: parsed.answers,
-			usage: parsed.usage,
-		});
+		appendJsonLine(
+			options.logPath,
+			{
+				at: new Date(started).toISOString(),
+				ms: now() - started,
+				source: options.source,
+				model: parsed.model,
+				state: stateFingerprint(request.state),
+				answers: parsed.answers,
+				usage: parsed.usage,
+			},
+			"decision",
+			LOG_MAX_BYTES,
+		);
 	}
 	return parsed;
 }
@@ -180,14 +184,3 @@ export function stateFingerprint(state: DecisionRequest["state"]): { sha256: str
 	return { sha256: createHash("sha256").update(text).digest("hex").slice(0, 16), chars: text.length };
 }
 
-function logDecision(path: string, entry: object): void {
-	try {
-		mkdirSync(dirname(path), { recursive: true });
-		try {
-			if (statSync(path).size > LOG_MAX_BYTES) renameSync(path, `${path}.1`);
-		} catch {}
-		appendFileSync(path, `${JSON.stringify(entry)}\n`);
-	} catch (error) {
-		console.error("nano: decision log not written:", (error as Error)?.message ?? error);
-	}
-}

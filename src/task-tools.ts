@@ -3,7 +3,7 @@ import { Type } from "typebox";
 import type { Config } from "./config.ts";
 import { chooseModel } from "./models.ts";
 import { describeTask, type TaskManager } from "./tasks.ts";
-import { assertPrivateAllowed, ModelParam, PrivateParam, text } from "./tools.ts";
+import { ModelParam, PrivateParam, text } from "./tools.ts";
 
 /** Tools for the main conversation to hand work to background workers. Workers do not get these. */
 export function taskTools(config: Config, tasks: TaskManager, spaceId: string): ExtensionFactory {
@@ -23,8 +23,8 @@ export function taskTools(config: Config, tasks: TaskManager, spaceId: string): 
 				private: PrivateParam,
 			}),
 			async execute(_id, params) {
-				assertPrivateAllowed(config, params.private);
 				const choice = chooseModel(params.model ?? "main", Boolean(params.private), Boolean(config.local));
+				if ("refuse" in choice) throw new Error(choice.refuse);
 				const task = tasks.start({
 					title: params.title,
 					instructions: params.instructions,
@@ -34,7 +34,7 @@ export function taskTools(config: Config, tasks: TaskManager, spaceId: string): 
 					source: "delegate",
 				});
 				const waiting = task.status === "queued" ? ` It is queued behind ${config.maxTasks} running task(s).` : "";
-				const note = "note" in choice && choice.note ? ` ${choice.note}` : "";
+				const note = choice.note ? ` ${choice.note}` : "";
 				return text(
 					`Started background task ${task.id}.${waiting}${note} The result will arrive here as a message. ` +
 						"If you have not yet told the owner you are on it, do so in one short line; otherwise write nothing more now. Do not mention the task id.",
@@ -50,7 +50,7 @@ export function taskTools(config: Config, tasks: TaskManager, spaceId: string): 
 			async execute() {
 				const all = tasks.list();
 				if (all.length === 0) return text("No background tasks.");
-				const active = all.filter((t) => t.status === "queued" || t.status === "running");
+				const active = tasks.active();
 				const recent = all.filter((t) => !active.includes(t)).slice(-5);
 				return text([...active, ...recent].map((t) => describeTask(t)).join("\n"));
 			},

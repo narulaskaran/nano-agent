@@ -1,6 +1,5 @@
-import { appendFileSync, mkdirSync } from "node:fs";
-import { dirname } from "node:path";
 import { decide, type DecisionRequest, top, type Transport } from "./decide.ts";
+import { appendJsonLine } from "./json-store.ts";
 
 /**
  * The attention gate: a script job's output is a set of facts, and the decision model (decide.ts) answers
@@ -43,14 +42,14 @@ export function validateGate(gate: Gate): void {
 }
 
 export function gateRequest(input: { name: string; output: string; gate: Gate; sent?: GateSent[]; now: number; timeZone: string }): DecisionRequest {
-	const localTime = new Intl.DateTimeFormat("en-US", { timeZone: input.timeZone, dateStyle: "medium", timeStyle: "short" }).format(new Date(input.now));
+	const when = new Intl.DateTimeFormat("en-US", { timeZone: input.timeZone, dateStyle: "medium", timeStyle: "short" });
 	return {
 		state: {
 			check: input.name,
-			now: localTime,
+			now: when.format(new Date(input.now)),
 			output: input.output.slice(0, OUTPUT_CHARS),
 			already_told_owner: (input.sent ?? []).map((s) => ({
-				when: new Intl.DateTimeFormat("en-US", { timeZone: input.timeZone, dateStyle: "medium", timeStyle: "short" }).format(new Date(s.at)),
+				when: when.format(new Date(s.at)),
 				text: s.text,
 			})),
 		},
@@ -98,10 +97,5 @@ export function rememberSent(sent: GateSent[] | undefined, text: string, at: num
 
 /** One line per gate event in <data>/gate.jsonl: verdicts, and what the agent did after, for tuning `min`. No output text. */
 export function logGate(path: string, entry: Record<string, unknown>): void {
-	try {
-		mkdirSync(dirname(path), { recursive: true });
-		appendFileSync(path, `${JSON.stringify({ at: new Date().toISOString(), ...entry })}\n`);
-	} catch (error) {
-		console.error("nano: gate log not written:", (error as Error)?.message ?? error);
-	}
+	appendJsonLine(path, { at: new Date().toISOString(), ...entry }, "gate");
 }

@@ -2,10 +2,15 @@ import { join } from "node:path";
 import type { Api, Model } from "@earendil-works/pi-ai";
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { refreshProviderSettings } from "./provider-settings.ts";
-import { type Config, MAX_OUTPUT_TOKENS } from "./config.ts";
+import { type Config, type LocalModel, MAX_OUTPUT_TOKENS } from "./config.ts";
 
 /** Pi provider id under which `NANO_LOCAL_*` is registered. */
 export const LOCAL_PROVIDER = "nano-local";
+
+/** The provider id the local model is registered under: the vault's role provider (provider-settings.ts) or our own. */
+export function localProviderId(local: LocalModel): string {
+	return local.vault ? "nano-vault-local" : LOCAL_PROVIDER;
+}
 
 export type ModelRole = "main" | "local";
 
@@ -92,7 +97,7 @@ export function resolveModel(
 	const choice = chooseModel(role, isPrivate, Boolean(config.local));
 	if ("refuse" in choice) throw new Error(choice.refuse);
 	const [provider, id] =
-		choice.use === "local" && config.local ? [config.local.vault ? "nano-vault-local" : LOCAL_PROVIDER, config.local.modelId] : [config.modelProvider, config.modelId];
+		choice.use === "local" && config.local ? [localProviderId(config.local), config.local.modelId] : [config.modelProvider, config.modelId];
 	const found = runtime.getModel(provider, id);
 	if (!found) throw new Error(`Unknown model ${provider}/${id}`);
 	const model = capOutput(withProviderOrder(config, found));

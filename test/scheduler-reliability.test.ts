@@ -6,7 +6,8 @@ import { test } from "node:test";
 import type { Config } from "../src/config.ts";
 import { handBackPrompt } from "../src/tasks.ts";
 import { noDecisionModel } from "./helpers/no-decision-model.ts";
-import { type BackgroundWork, cronMatches, isTransient, type JobSink, REPAIR_GRACE_MS, RETRY_MS, Scheduler } from "../src/scheduler.ts";
+import { type BackgroundWork, cronMatches, type JobSink, REPAIR_GRACE_MS, RETRY_MS, Scheduler } from "../src/scheduler.ts";
+import { isTransient } from "../src/transient.ts";
 
 /** A scheduler on a temp directory with a sink whose sends can be made to fail. */
 function setup() {

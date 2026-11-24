@@ -1,7 +1,8 @@
 import { createHash } from "node:crypto";
-import { appendFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
+import { appendFileSync, mkdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 import type { ExtensionFactory } from "@earendil-works/pi-coding-agent";
+import { readIfExists } from "../../src/config.ts";
 import type { PackContext } from "../../src/packs.ts";
 import {
 	ACCESS_LEVELS,
@@ -62,7 +63,7 @@ export default function t3code(ctx: PackContext): ExtensionFactory {
 			const seen = join(dataDir, "t3code", "redeemed-codes");
 			const digest = createHash("sha256").update(found.code).digest("hex");
 			let outcome: string;
-			if (existsSync(seen) && readFileSync(seen, "utf8").split("\n").includes(digest)) {
+			if (readIfExists(seen)?.split("\n").includes(digest)) {
 				outcome = "it was redeemed earlier and is used up";
 			} else {
 				mkdirSync(dirname(seen), { recursive: true, mode: 0o700 });
