@@ -168,8 +168,8 @@ interface RunState {
 	aborted: boolean;
 }
 
-/** How many sends made before the session exists are kept for it. */
-const DELIVERED_KEEP = 5;
+/** How many notes made before the session exists are kept for it. */
+const NOTE_KEEP = 5;
 
 export interface ConversationOptions {
 	/** Router decisions, used only when the router is on. Tests inject a fake. */
@@ -198,10 +198,11 @@ export class Conversation {
 	private rolloverAt?: number;
 	/** The turn in progress, if any. */
 	private run?: RunState;
-	/** Texts `deliver` sent before the session was started, for its first turn to record. */
-	private delivered: string[] = [];
-	/** Owner messages the router answered with no turn before the session was started, for its first turn to record. */
-	private unanswered: string[] = [];
+	/**
+	 * Notes to put in the session once it exists: a send made outside the conversation, or an owner
+	 * message that got no reply. `make` runs at record time, so a timestamp in the text is current.
+	 */
+	private notes: { customType: string; make: () => string }[] = [];
 	/** Owner messages are routed one at a time, in arrival order. */
 	private routing: Promise<void> = Promise.resolve();
 	private readonly decider?: Decider;
@@ -251,21 +252,29 @@ export class Conversation {
 	 * Unlike a reply, a failed send throws, so the scheduler can retry or report it.
 	 */
 	async deliver(text: string): Promise<void> {
-		await this.say(text, true);
 		if (isSilent(text)) return;
-		if (this.session) await this.recordDelivered(this.session, text);
-		else this.delivered = [...this.delivered, text].slice(-DELIVERED_KEEP);
+		await this.channel.send(this.spaceId, text);
+		this.record("nano", text); // only once it was sent, so a retry is not logged twice
+		await this.keepNote(
+			"nano-delivered",
+			() => `[Sent to the owner outside this conversation (a scheduled job, reminder or notice), not written by you here: "${clip(text)}"]`,
+		);
 	}
 
 	/**
-	 * Puts a text the agent did not write into its session history, where it was sent, so "why did you send that?" has
-	 * an answer. Pi holds it until a turn in progress ends. Not a reply, so it starts no turn.
+	 * Puts a note the agent did not write into its session history. Pi holds it until a turn in progress ends.
+	 * Not a reply, so it starts no turn.
 	 */
-	private async recordDelivered(session: AgentSession, text: string): Promise<void> {
-		const content = `[Sent to the owner outside this conversation (a scheduled job, reminder or notice), not written by you here: "${clip(text)}"]`;
+	private async recordNote(session: AgentSession, customType: string, content: string): Promise<void> {
 		await session
-			.sendCustomMessage({ customType: "nano-delivered", content, display: false }, { triggerTurn: false })
-			.catch((error) => console.error("nano: could not record a delivered message:", (error as Error)?.message ?? error));
+			.sendCustomMessage({ customType, content, display: false }, { triggerTurn: false })
+			.catch((error) => console.error(`nano: could not record a ${customType} message:`, (error as Error)?.message ?? error));
+	}
+
+	/** Record `make()` now, or keep it until the session exists. */
+	private async keepNote(customType: string, make: () => string): Promise<void> {
+		if (this.session) await this.recordNote(this.session, customType, make());
+		else this.notes = [...this.notes, { customType, make }].slice(-NOTE_KEEP);
 	}
 
 	async dispose(): Promise<void> {
@@ -371,15 +380,10 @@ export class Conversation {
 
 	/** An owner message the router decided needs no reply: the session still learns it was said. */
 	private async noteUnanswered(spoken: string): Promise<void> {
-		if (this.session) await this.recordUnanswered(this.session, spoken);
-		else this.unanswered = [...this.unanswered, spoken].slice(-DELIVERED_KEEP);
-	}
-
-	private async recordUnanswered(session: AgentSession, spoken: string): Promise<void> {
-		const content = `[${localStamp(this.config)}] [The owner said: "${clip(spoken)}". It only closed the exchange, so no reply was sent.]`;
-		await session
-			.sendCustomMessage({ customType: "nano-unanswered", content, display: false }, { triggerTurn: false })
-			.catch((error) => console.error("nano: could not record an unanswered message:", (error as Error)?.message ?? error));
+		await this.keepNote(
+			"nano-unanswered",
+			() => `[${localStamp(this.config)}] [The owner said: "${clip(spoken)}". It only closed the exchange, so no reply was sent.]`,
+		);
 	}
 
 	private dispatch(work: Work & { from: "owner" }): void {
@@ -424,11 +428,9 @@ export class Conversation {
 		void this.channel.typing(this.spaceId, true);
 		try {
 			const { session, carry } = await this.ensureSession();
-			// Sent before the session existed. A new context window already carries them over in `carry`.
-			const delivered = this.delivered.splice(0);
-			const unanswered = this.unanswered.splice(0);
-			if (!carry) for (const text of delivered) await this.recordDelivered(session, text);
-			if (!carry) for (const text of unanswered) await this.recordUnanswered(session, text);
+			// Noted before the session existed. A new context window already carries them over in `carry`.
+			const pending = this.notes.splice(0);
+			if (!carry) for (const note of pending) await this.recordNote(session, note.customType, note.make());
 			const intro = carry
 				? `[New context window after a gap. The last messages before it, for continuity only:\n${carry}]\n\n`
 				: "";
@@ -519,16 +521,20 @@ export class Conversation {
 			}
 			// Once a tool call is being written it is left to run; a cancel waits for the next model call.
 			if (run && event.type === "message_update" && event.assistantMessageEvent.type === "toolcall_start") run.phase = "tools";
-			if (run && event.type === "agent_end") run.phase = "done";
+			// A system turn sends its final answer once, when the run ends, the way a worker takes the last assistant text.
+			if (run && event.type === "agent_end") {
+				run.phase = "done";
+				if (run.from === "system" && !event.willRetry) this.saySystemAnswer(event.messages);
+			}
 			if (event.type !== "message_end" || event.message.role !== "assistant") return;
 			// A cancelled reply is never sent, not even the part already written.
 			if (event.message.stopReason === "aborted") return;
 			const hasToolCall = event.message.content.some((c) => c.type === "toolCall");
 			if (run) run.phase = hasToolCall ? "tools" : "done";
+			// Owner turns stream each assistant message. A system turn waits for agent_end.
+			if (run?.from === "system") return;
 			const { text, error } = assistantText(event.message);
-			// System turns (scheduled jobs, outbox tasks, task hand-backs) may narrate a tool call before replying [silent].
-			if (text && !(run?.from === "system" && hasToolCall)) void this.say(text);
-			else if (error) void this.say(`I hit an error talking to the model: ${error.slice(0, 200)}`);
+			this.sayAssistant(text, error);
 		});
 		this.session = session;
 		this.injectedSkills = new Set();
@@ -538,14 +544,32 @@ export class Conversation {
 		return { session, carry };
 	}
 
-	private async say(text: string, rethrow = false): Promise<void> {
+	/**
+	 * The last assistant text of this run, sent once. Same choice a worker makes with
+	 * `getLastAssistantText` after its prompt: earlier narration stays in the session.
+	 */
+	private saySystemAnswer(messages: readonly unknown[]): void {
+		if (this.run?.aborted) return;
+		let last: unknown;
+		for (let i = messages.length - 1; i >= 0; i--) {
+			if ((messages[i] as { role?: string }).role === "assistant") {
+				last = messages[i];
+				break;
+			}
+		}
+		if (!last || (last as { stopReason?: string }).stopReason === "aborted") return;
+		const { text, error } = assistantText(last);
+		this.sayAssistant(text, error);
+	}
+
+	private sayAssistant(text: string, error?: string): void {
+		if (text) void this.say(text);
+		else if (error) void this.say(`I hit an error talking to the model: ${error.slice(0, 200)}`);
+	}
+
+	private async say(text: string): Promise<void> {
 		// A scheduled task with nothing worth reporting answers [silent].
 		if (isSilent(text)) return;
-		if (rethrow) {
-			await this.channel.send(this.spaceId, text);
-			this.record("nano", text); // only once it was sent, so a retry is not logged twice
-			return;
-		}
 		this.record("nano", text);
 		try {
 			await this.channel.send(this.spaceId, text);
