@@ -1,4 +1,4 @@
-import type { Transport } from "../../src/decide.ts";
+import { createDecider, type Decider, type Transport } from "../../src/decide.ts";
 
 /**
  * A decision transport that behaves like an unconfigured decision model. Tests that do not script decisions pass it,
@@ -7,3 +7,8 @@ import type { Transport } from "../../src/decide.ts";
 export const noDecisionModel: Transport = async () => {
 	throw new Error("no decision model in tests");
 };
+
+/** A decider that never calls a real model. Pass a scripted transport to answer decisions. */
+export function testDecider(dataDir: string, transport: Transport = noDecisionModel): Decider {
+	return createDecider({ dataDir, transport, refusePrivate: true });
+}

@@ -4,9 +4,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import type { Config } from "../src/config.ts";
-import type { Transport } from "../src/decide.ts";
+import { decisionLogPath, type Transport } from "../src/decide.ts";
 import { gateRequest, rememberSent } from "../src/gate.ts";
 import { type BackgroundWork, type Job, type JobSink, Scheduler } from "../src/scheduler.ts";
+import { testDecider } from "./helpers/no-decision-model.ts";
 
 const MINUTE = Date.UTC(2026, 10, 14, 10, 0, 5);
 
@@ -33,7 +34,7 @@ function setup(reply: { answer?: "notify" | "quiet"; p?: number; status?: number
 		task: async () => {},
 		background: async (_space, work) => void background.push(work),
 	};
-	const scheduler = new Scheduler({ dataDir, owner: "owner" } as Config, sink, { decisionTransport: transport });
+	const scheduler = new Scheduler({ dataDir, owner: "owner" } as Config, sink, { decider: testDecider(dataDir, transport) });
 	const tick = async (at: number) => {
 		await scheduler.tick(new Date(at));
 		const running = (scheduler as unknown as { running: Set<string> }).running;
@@ -68,9 +69,9 @@ test("a confident quiet stops a gated script; the logs hold the verdict but not 
 	assert.equal(entry.job, job.id);
 	assert.equal(entry.gate, "quiet");
 	assert.equal(entry.action, "quiet");
-	const logs = readFileSync(join(dataDir, "gate.jsonl"), "utf8") + readFileSync(join(dataDir, "decisions.jsonl"), "utf8");
+	const logs = readFileSync(join(dataDir, "gate.jsonl"), "utf8") + readFileSync(decisionLogPath(dataDir), "utf8");
 	assert.ok(!logs.includes("Entry 42") && !logs.includes("arbitration"), "no output text in the logs");
-	assert.match(readFileSync(join(dataDir, "decisions.jsonl"), "utf8"), new RegExp(`"source":"gate:${job.id}"`));
+	assert.match(readFileSync(decisionLogPath(dataDir), "utf8"), new RegExp(`"source":"gate:${job.id}"`));
 });
 
 test("notify lets the output through and the next run tells the gate what was already sent", async () => {

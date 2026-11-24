@@ -5,7 +5,9 @@ import { join } from "node:path";
 import { test } from "node:test";
 import type { Config } from "../src/config.ts";
 import type { Transport } from "../src/decide.ts";
+import { triageFailure } from "../src/triage.ts";
 import { type BackgroundWork, Scheduler } from "../src/scheduler.ts";
+import { testDecider } from "./helpers/no-decision-model.ts";
 
 const MINUTE = Date.UTC(2026, 10, 14, 10, 0, 5);
 
@@ -32,7 +34,7 @@ function setup(
 	const scheduler = new Scheduler(
 		{ dataDir, owner: "owner" } as Config,
 		{ send: async (_s, text) => void sent.push(text), task: async () => {}, background: async (_s, work) => void (work.repairOf && repairs.push(work)) },
-		{ decisionTransport: transport },
+		{ decider: testDecider(dataDir, transport) },
 	);
 	const job = scheduler.add({ name: "Price watch", kind: "script", body: `echo '${error}' >&2; exit 1`, cron: "* * * * *", spaceId: "owner", ...(extra.private ? { private: true, then: "task", background: true } : {}) });
 	const tick = async (at: number) => {
@@ -109,4 +111,22 @@ test("only a near-certain owner verdict skips the repair", async () => {
 	await sure.tick(MINUTE);
 	assert.equal(sure.repairs.length, 0);
 	assert.equal(sure.sent.length, 1);
+});
+
+test("a transient decision error is triage's own transient result", async () => {
+	const dataDir = mkdtempSync(join(tmpdir(), "nano-triage-direct-"));
+	const decider = testDecider(dataDir, async () => ({ status: 503, text: "down" }));
+	const result = await triageFailure({ name: "Price watch", kind: "script", error: "KeyError: price", source: "triage:test", decider });
+	assert.deepEqual(result, { kind: "transient" });
+});
+
+test("a private failure is not sent to the decision model and falls back to the regex", async () => {
+	const skipped = setup({ kind: "owner" }, "KeyError: price", { private: true });
+	await skipped.tick(MINUTE);
+	assert.equal(skipped.calls(), 0, "private failures are not sent to the decision model");
+	assert.equal(skipped.repairs.length, 1, "regex: not transient, repaired");
+	const waiting = setup({ kind: "owner" }, "connection reset by peer", { private: true });
+	await waiting.tick(MINUTE);
+	assert.equal(waiting.calls(), 0);
+	assert.equal(waiting.repairs.length, 0, "regex: transient waits");
 });

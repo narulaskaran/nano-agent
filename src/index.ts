@@ -1,5 +1,6 @@
 import { join } from "node:path";
 import { Conversation, StateStore } from "./agent.ts";
+import { createDecider, decisionTransport } from "./decide.ts";
 import { type Channel, createPhotonChannel, createStdinChannel } from "./channel.ts";
 import { currentTimezone, loadConfig, startTimezoneSync } from "./config.ts";
 import { createModelRuntime, localProviderId } from "./models.ts";
@@ -49,6 +50,8 @@ async function main(): Promise<void> {
 	}
 
 	const channel: Channel = config.channel === "stdin" ? createStdinChannel() : await createPhotonChannel(config);
+	// One decider for the router, the gate and failure triage: transport, log and the private-input rule.
+	const decider = createDecider({ dataDir: config.dataDir, transport: decisionTransport(), refusePrivate: true });
 	const store = new StateStore(config.dataDir);
 	const conversations = new Map<string, Conversation>();
 	const scheduler: Scheduler = new Scheduler(config, {
@@ -67,7 +70,7 @@ async function main(): Promise<void> {
 				repairOf: work.repairOf,
 			});
 		},
-	});
+	}, { decider });
 	const tasks: TaskManager = new TaskManager({
 		path: join(config.dataDir, "tasks.json"),
 		maxConcurrent: config.maxTasks,
@@ -79,7 +82,7 @@ async function main(): Promise<void> {
 	function conversation(spaceId: string): Conversation {
 		let c = conversations.get(spaceId);
 		if (!c) {
-			c = new Conversation(spaceId, config, channel, store, modelRuntime, scheduler, tasks);
+			c = new Conversation(spaceId, config, channel, store, modelRuntime, scheduler, tasks, { decider });
 			conversations.set(spaceId, c);
 		}
 		return c;
