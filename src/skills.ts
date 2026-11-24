@@ -1,5 +1,5 @@
-import { existsSync, readdirSync, readFileSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
+import { dirname, join } from "node:path";
 import type { Config } from "./config.ts";
 import { skillPaths } from "./packs.ts";
 
@@ -16,8 +16,41 @@ export function parseSkill(text: string): { name?: string; description?: string 
 	return { name: field("name"), description: field("description") };
 }
 
-/** The skills advertised to the model (enabled packs plus data/skills). Later folders do not replace earlier names. */
-export function listSkills(config: Config): SkillInfo[] {
+interface SkillSnapshot {
+	stamp: string;
+	skills: SkillInfo[];
+}
+
+const skillSnapshots = new Map<string, SkillSnapshot>();
+
+function skillsKey(config: Config): string {
+	return `${config.appDir}\0${config.dataDir}\0${config.packs.join("\0")}`;
+}
+
+/** Skill directories and SKILL.md files. A changed mtime (or a path appearing or disappearing) rebuilds the list. */
+function watchedSkillPaths(config: Config, skills: SkillInfo[]): string[] {
+	return [
+		join(config.dataDir, "skills"),
+		...config.packs.flatMap((name) => [join(config.dataDir, "packs", name, "skills"), join(config.appDir, "packs", name, "skills")]),
+		...skills.flatMap((skill) => [dirname(skill.path), skill.path]),
+	];
+}
+
+function mtimeStamp(paths: string[]): string {
+	let stamp = "";
+	for (const path of paths) {
+		let mtime = "";
+		try {
+			mtime = String(statSync(path).mtimeMs);
+		} catch {
+			// Missing. Creation or removal changes the stamp on the next call.
+		}
+		stamp += `${path}\0${mtime}\n`;
+	}
+	return stamp;
+}
+
+function scanSkills(config: Config): SkillInfo[] {
 	const skills = new Map<string, SkillInfo>();
 	for (const dir of skillPaths(config)) {
 		let entries: string[] = [];
@@ -37,4 +70,14 @@ export function listSkills(config: Config): SkillInfo[] {
 		}
 	}
 	return [...skills.values()];
+}
+
+/** The skills advertised to the model (enabled packs plus data/skills). Later folders do not replace earlier names. */
+export function listSkills(config: Config): SkillInfo[] {
+	const key = skillsKey(config);
+	const cached = skillSnapshots.get(key);
+	if (cached && cached.stamp === mtimeStamp(watchedSkillPaths(config, cached.skills))) return cached.skills;
+	const skills = scanSkills(config);
+	skillSnapshots.set(key, { stamp: mtimeStamp(watchedSkillPaths(config, skills)), skills });
+	return skills;
 }

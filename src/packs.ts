@@ -38,12 +38,18 @@ export interface PackContext {
 
 type PackExtension = (ctx: PackContext) => ExtensionFactory | ExtensionFactory[];
 
+/** Missing packs already reported. One line per pack per process, not per message. */
+const missingPackLogged = new Set<string>();
+
 export function packDirs(config: Config): string[] {
 	const dirs: string[] = [];
 	for (const name of config.packs) {
 		const found = [join(config.dataDir, "packs", name), join(config.appDir, "packs", name)].find((d) => existsSync(d));
 		if (found) dirs.push(found);
-		else console.error(`nano: pack "${name}" not found in ${config.dataDir}/packs or ${config.appDir}/packs`);
+		else if (!missingPackLogged.has(name)) {
+			missingPackLogged.add(name);
+			console.error(`nano: pack "${name}" not found in ${config.dataDir}/packs or ${config.appDir}/packs`);
+		}
 	}
 	return dirs;
 }
