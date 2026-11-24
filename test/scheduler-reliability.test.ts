@@ -4,7 +4,6 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import type { Config } from "../src/config.ts";
-import { handBackPrompt } from "../src/tasks.ts";
 import { testDecider } from "./helpers/no-decision-model.ts";
 import { type BackgroundWork, cronMatches, type JobSink, REPAIR_GRACE_MS, RETRY_MS, Scheduler } from "../src/scheduler.ts";
 import { isTransient } from "../src/transient.ts";
@@ -40,6 +39,12 @@ function setup() {
 		await idle();
 	};
 	return { dataDir, sent, repairs, state, scheduler, tick };
+}
+
+/** Report a repair ending and wait until its owner message, if any, has been sent. */
+async function endRepair(scheduler: Scheduler, jobId: string, outcome: { status: string; error?: string; result?: string }, at: number): Promise<void> {
+	scheduler.taskEnded({ repairOf: jobId, spaceId: "owner", title: "repair", ...outcome }, at);
+	await new Promise((r) => setTimeout(r, 20));
 }
 
 const REMINDER = { name: "dentist", kind: "message", body: "call the dentist", spaceId: "owner" } as const;
@@ -154,12 +159,66 @@ test("a recovered job that the owner was never told about recovers silently", as
 	assert.deepEqual(sent, [], "a successful repair stays silent");
 });
 
-test("a repair that fixed the job stays silent; one that could not reaches the owner", () => {
-	const base = { id: "t1", title: 'Repair "feed"', instructions: "", role: "main", private: false, spaceId: "owner", source: "delegate", repairOf: "abc", createdAt: 0 } as const;
-	assert.equal(handBackPrompt({ ...base, status: "done", result: "FIXED: the page moved, updated the URL" }), undefined);
-	assert.match(handBackPrompt({ ...base, status: "done", result: "The feed now needs a login. Please sign in again." }) ?? "", /needs a login/);
-	assert.match(handBackPrompt({ ...base, status: "failed", error: "worker crashed" }) ?? "", /failed: worker crashed/);
-	assert.equal(handBackPrompt({ ...base, status: "failed", error: "The provider service is unavailable" }), undefined);
+test("a non-transient repair failure tells the owner once for the streak", async () => {
+	const { sent, repairs, scheduler, tick } = setup();
+	const job = scheduler.add({ name: "price check", kind: "script", body: `echo "jq: error: Cannot index null" >&2; exit 1`, cron: "* * * * *", spaceId: "owner" });
+
+	await tick(MINUTE);
+	assert.equal(repairs.length, 1);
+	assert.deepEqual(sent, []);
+
+	await endRepair(scheduler, job.id, { status: "failed", error: "worker crashed" }, MINUTE + 30_000);
+	assert.equal(sent.length, 1);
+	assert.match(sent[0] ?? "", /"price check" keeps failing and I could not fix it/);
+	assert.equal(scheduler.list().find((j) => j.id === job.id)?.health?.escalated, true);
+
+	await tick(MINUTE + 60_000);
+	await tick(MINUTE + REPAIR_GRACE_MS + 60_000);
+	assert.equal(sent.length, 1, "the streak is not reported again");
+	assert.equal(repairs.length, 1, "no second repair after the owner was told");
+});
+
+test("a repair that finishes without FIXED tells the owner once", async () => {
+	const { sent, scheduler, tick } = setup();
+	const job = scheduler.add({ name: "feed", kind: "script", body: `echo "jq: error: Cannot index null" >&2; exit 1`, cron: "* * * * *", spaceId: "owner" });
+	await tick(MINUTE);
+	await endRepair(scheduler, job.id, { status: "done", result: "The feed now needs a login. Please sign in again." }, MINUTE + 30_000);
+	assert.equal(sent.length, 1);
+	assert.match(sent[0] ?? "", /"feed" keeps failing and I could not fix it/);
+	await tick(MINUTE + REPAIR_GRACE_MS + 60_000);
+	assert.equal(sent.length, 1, "the streak is not reported again");
+});
+
+test("a FIXED: repair produces no owner message", async () => {
+	const { dataDir, sent, scheduler, tick } = setup();
+	const flag = join(dataDir, "workspace", "ok");
+	const job = scheduler.add({ name: "feed", kind: "script", body: `test -f ${flag} || exit 1`, cron: "* * * * *", spaceId: "owner" });
+	await tick(MINUTE);
+	await endRepair(scheduler, job.id, { status: "done", result: "FIXED: the page moved, updated the URL" }, MINUTE + 30_000);
+	assert.deepEqual(sent, []);
+	assert.equal(scheduler.list().find((j) => j.id === job.id)?.health?.escalated, undefined);
+
+	writeFileSync(flag, "");
+	await tick(MINUTE + 60_000);
+	assert.deepEqual(sent, [], "the next run proving the fix stays quiet");
+	assert.equal(scheduler.list().find((j) => j.id === job.id)?.health?.failures, 0);
+});
+
+test("a transient repair failure stays quiet until the repair grace runs out", async () => {
+	const { sent, scheduler, tick } = setup();
+	const job = scheduler.add({ name: "status", kind: "script", body: `echo "jq: error: Cannot index null" >&2; exit 1`, cron: "* * * * *", spaceId: "owner" });
+	await tick(MINUTE);
+	await endRepair(scheduler, job.id, { status: "failed", error: "The provider service is unavailable" }, MINUTE + 30_000);
+	assert.deepEqual(sent, []);
+
+	await tick(MINUTE + 60_000);
+	assert.deepEqual(sent, [], "still inside the grace period");
+
+	await tick(MINUTE + REPAIR_GRACE_MS + 60_000);
+	assert.equal(sent.length, 1);
+	assert.match(sent[0] ?? "", /"status" keeps failing and I could not fix it/);
+	await tick(MINUTE + REPAIR_GRACE_MS + 120_000);
+	assert.equal(sent.length, 1, "told once");
 });
 
 test("a failed background run of a scheduled task goes through the same policy", async () => {

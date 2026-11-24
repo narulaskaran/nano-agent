@@ -64,8 +64,7 @@ async function main(): Promise<void> {
 				role: work.model ?? "main",
 				private: Boolean(work.private),
 				spaceId,
-				// A repair that could not fix the job speaks to the owner directly; a scheduled run may answer [silent].
-				source: work.repairOf ? "delegate" : "schedule",
+				source: "schedule",
 				jobId: work.jobId,
 				repairOf: work.repairOf,
 			});

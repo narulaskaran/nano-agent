@@ -1,7 +1,6 @@
 import { randomBytes } from "node:crypto";
 import { readJsonFile, writeJsonFile } from "./json-store.ts";
 import type { ModelRole } from "./models.ts";
-import { isTransient } from "./transient.ts";
 
 /**
  * Background tasks: self-contained work that runs in its own Pi session so the main
@@ -23,7 +22,7 @@ export interface TaskSpec {
 	source: "delegate" | "schedule";
 	/** The scheduled job this run belongs to. Its outcome goes to the scheduler's failure policy. */
 	jobId?: string;
-	/** A repair of this scheduled job. A successful repair (result starting "FIXED:") is not passed on. */
+	/** A repair of this scheduled job. The scheduler decides the outcome; nothing is handed back. */
 	repairOf?: string;
 }
 
@@ -62,7 +61,7 @@ export interface TaskManagerOptions {
 	runner: TaskRunner;
 	/** Hands a finished task to the main conversation as a non-owner event. Calls arrive in completion order. */
 	handBack: (spaceId: string, prompt: string) => Promise<void>;
-	/** Called when a run of a scheduled job (one with a jobId) ends. */
+	/** Called when a scheduled job's background run (jobId) or its repair (repairOf) ends. */
 	onJobRunEnded?: (task: Task) => void;
 	now?: () => number;
 }
@@ -72,21 +71,18 @@ const RESULT_CHARS = 4000;
 
 export const isSilent = (text: string | undefined): boolean => /^\[silent\]\.?$/i.test((text ?? "").trim());
 
-/** A repair worker's answer when it fixed the job. */
-export const isRepaired = (text: string | undefined): boolean => /^FIXED:/i.test((text ?? "").trim());
-
 function clip(text: string, max: number): string {
 	return text.length > max ? `${text.slice(0, max)}\n[cut at ${max} of ${text.length} characters]` : text;
 }
 
 /** What the main agent receives when a task ends, or undefined when nothing should reach it. */
 export function handBackPrompt(task: Task): string | undefined {
+	// A repair's outcome belongs to the scheduler, the same way a failed job run's does.
+	if (task.repairOf) return undefined;
 	const head = `Background task ${task.id} "${task.title}"`;
 	const scheduled = task.source === "schedule";
 	if (task.status === "done") {
 		if (scheduled && isSilent(task.result)) return undefined;
-		// The owner asked for successful repairs to stay silent; the fix stays in tasks.json and the log.
-		if (task.repairOf && isRepaired(task.result)) return undefined;
 		return [
 			`${head} finished${task.model ? ` (ran on ${task.model})` : ""}.`,
 			task.note ?? "",
@@ -102,9 +98,6 @@ export function handBackPrompt(task: Task): string | undefined {
 	if (task.status === "failed") {
 		// A scheduled job's failure goes to the scheduler, which retries, repairs or tells the owner.
 		if (task.jobId) return undefined;
-		// A repair that died on a transient/provider outage should not trigger a hand-back turn that fails on the same outage;
-		// if the job keeps failing past REPAIR_GRACE_MS, the scheduler will escalate once.
-		if (task.repairOf && task.error && isTransient(task.error)) return undefined;
 		return `${head} failed: ${task.error ?? "unknown error"}\nTell the owner briefly, and offer to retry if it still matters.`;
 	}
 	return undefined;
@@ -249,7 +242,7 @@ export class TaskManager {
 		this.save();
 		console.error(`nano: task ${task.id} (${task.title}) ${status}${task.error ? `: ${task.error}` : ""}`);
 		if (task.repairOf && status === "done") console.error(`nano: repair of job ${task.repairOf}: ${(task.result ?? "").replace(/\s+/g, " ").slice(0, 300)}`);
-		if (task.jobId) {
+		if (task.jobId || task.repairOf) {
 			try {
 				this.options.onJobRunEnded?.(task);
 			} catch (error) {

@@ -77,7 +77,7 @@ export interface BackgroundWork {
 	private?: boolean;
 	/** The job this run belongs to; its outcome comes back through Scheduler.taskEnded. */
 	jobId?: string;
-	/** A repair attempt for this job id. A successful repair stays silent; anything else reaches the owner. */
+	/** A repair attempt for this job. Its ending comes back through Scheduler.taskEnded. */
 	repairOf?: string;
 }
 
@@ -385,8 +385,12 @@ export class Scheduler {
 		this.save();
 	}
 
-	/** A background run of a job ended (TaskManager calls this). Feeds the same failure policy as scripts. */
-	taskEnded(task: { jobId?: string; spaceId: string; title: string; status: string; error?: string; result?: string }, now = Date.now()): void {
+	/** A background run or repair ended (TaskManager calls this). A job run feeds the same failure policy as scripts. */
+	taskEnded(task: { jobId?: string; repairOf?: string; spaceId: string; title: string; status: string; error?: string; result?: string }, now = Date.now()): void {
+		if (task.repairOf) {
+			this.repairEnded(task);
+			return;
+		}
 		if (!task.jobId) return;
 		const job = this.jobs.find((j) => j.id === task.jobId);
 		if (task.status === "done") {
@@ -404,6 +408,21 @@ export class Scheduler {
 		if (job) void this.failed(job, error, now);
 		// A one-shot job is gone by now and never runs again, so there is nothing to wait for or repair.
 		else void this.sink.send(task.spaceId, `The scheduled task "${task.title}" failed: ${error.slice(0, 200)}`).catch(() => {});
+	}
+
+	/**
+	 * The repair worker finished. FIXED: stays quiet and the next run proves it. A transient
+	 * failure keeps waiting. Any other ending tells the owner once, through the same escalate()
+	 * a job that is still failing after REPAIR_GRACE_MS uses, so one streak is never reported twice.
+	 */
+	private repairEnded(task: { repairOf?: string; status: string; error?: string; result?: string }): void {
+		const job = task.repairOf ? this.jobs.find((j) => j.id === task.repairOf) : undefined;
+		const health = job?.health;
+		if (!job || !health || health.escalated) return;
+		if (task.status === "done" && isRepaired(task.result)) return;
+		if (task.status === "failed" && isTransient(task.error ?? "")) return;
+		if (task.status !== "done" && task.status !== "failed") return;
+		void this.escalate(job, health, "keeps failing and I could not fix it");
 	}
 
 	private succeeded(job: Job, now: number): void {
@@ -432,8 +451,9 @@ export class Scheduler {
 
 	/**
 	 * The failure policy. Transient errors wait for the next run, up to TRANSIENT_RUNS runs or
-	 * TRANSIENT_MS. Anything else gets one repair attempt. If the job still fails once the repair
-	 * has had REPAIR_GRACE_MS, the owner is told once, and the job stays quiet until it works again.
+	 * TRANSIENT_MS. Anything else gets one repair attempt. If that repair ends without a fix
+	 * (see repairEnded), or the job still fails once the repair has had REPAIR_GRACE_MS, the
+	 * owner is told once, and the job stays quiet until it works again.
 	 */
 	private async failed(job: Job, error: string, now: number): Promise<void> {
 		const health = this.noteFailure(job, error, now);
@@ -570,6 +590,11 @@ export function labelScriptOutput(name: string, output: string): string {
 /** A one-shot plain message: the one kind of job that is kept until it has been delivered. */
 function isReminder(job: Job): boolean {
 	return job.kind === "message" && job.at !== undefined;
+}
+
+/** A repair worker's answer when it fixed the job. The next run is what proves it. */
+function isRepaired(text: string | undefined): boolean {
+	return /^FIXED:/i.test((text ?? "").trim());
 }
 
 /** Brief for the one repair attempt a failing job gets. A fix stays silent; a failure to fix reaches the owner. */

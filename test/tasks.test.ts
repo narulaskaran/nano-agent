@@ -38,7 +38,7 @@ function fakeRunner() {
 	return { runner, started, pending, finish, fail };
 }
 
-function setup(options: { maxConcurrent?: number; timeoutMs?: number; path?: string; runner?: TaskRunner } = {}) {
+function setup(options: { maxConcurrent?: number; timeoutMs?: number; path?: string; runner?: TaskRunner; onJobRunEnded?: (task: Task) => void } = {}) {
 	const fake = fakeRunner();
 	const handed: { spaceId: string; prompt: string }[] = [];
 	const path = options.path ?? join(mkdtempSync(join(tmpdir(), "nano-tasks-")), "tasks.json");
@@ -48,6 +48,7 @@ function setup(options: { maxConcurrent?: number; timeoutMs?: number; path?: str
 		timeoutMs: options.timeoutMs ?? 60_000,
 		runner: options.runner ?? fake.runner,
 		handBack: async (spaceId, prompt) => void handed.push({ spaceId, prompt }),
+		onJobRunEnded: options.onJobRunEnded,
 	});
 	return { manager, handed, path, ...fake };
 }
@@ -174,6 +175,34 @@ test("a corrupt tasks file starts empty", () => {
 	writeFileSync(join(dir, "tasks.json"), "{not json");
 	const { manager } = setup({ path: join(dir, "tasks.json") });
 	assert.deepEqual(manager.list(), []);
+});
+
+test("a repair is not handed back; its ending is reported like a job run", async () => {
+	const ended: Task[] = [];
+	const { manager, handed, finish, fail } = setup({ maxConcurrent: 4, onJobRunEnded: (task) => ended.push(task) });
+	manager.start(spec("repair ok", { repairOf: "job1", source: "schedule" }));
+	manager.start(spec("repair bad", { repairOf: "job1", source: "schedule" }));
+	manager.start(spec("job run", { jobId: "job1", source: "schedule" }));
+	manager.start(spec("job fail", { jobId: "job1", source: "schedule" }));
+	await tick();
+	await finish("repair ok", "FIXED: updated the url");
+	await fail("repair bad", "worker crashed");
+	await finish("job run", "Price dropped to $40");
+	await fail("job fail", "tool crashed");
+	assert.deepEqual(
+		ended.map((task) => `${task.repairOf ?? task.jobId}:${task.status}:${task.result ?? task.error}`),
+		["job1:done:FIXED: updated the url", "job1:failed:worker crashed", "job1:done:Price dropped to $40", "job1:failed:tool crashed"],
+	);
+	assert.equal(handed.length, 1, "only the job run is handed back");
+	assert.match(handed[0]?.prompt ?? "", /Price dropped/);
+});
+
+test("hand-back skips every repair, whatever it answered", () => {
+	const base: Task = { ...spec("repair", { repairOf: "job1", source: "schedule" }), id: "ab12", status: "done", createdAt: 0, result: "FIXED: updated the url" };
+	assert.equal(handBackPrompt(base), undefined);
+	assert.equal(handBackPrompt({ ...base, result: "The feed now needs a login." }), undefined);
+	assert.equal(handBackPrompt({ ...base, status: "failed", error: "worker crashed" }), undefined);
+	assert.equal(handBackPrompt({ ...base, status: "failed", error: "The provider service is unavailable" }), undefined);
 });
 
 test("a [silent] scheduled result reaches no one; a delegated one still does", () => {
