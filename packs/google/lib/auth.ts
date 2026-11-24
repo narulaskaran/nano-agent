@@ -121,6 +121,18 @@ function parseExpiry(expiry: string | undefined): number {
  */
 export class Auth {
 	private readonly io: Io;
+	/** Parsed `token.json` (or the shared token file). Read once per process until we change it. */
+	private tokenRaw: AuthorizedUser | undefined;
+	private tokenLoaded = false;
+	/** Shared file exists but is not JSON. Cached with the token so later calls do not stat again. */
+	private tokenUnreadable = false;
+	/** Parsed `cache.json`. Read once per process until we change it. */
+	private cacheRaw: Cache | undefined;
+	private cacheLoaded = false;
+	/** Access token already resolved for this process. */
+	private memory: { accessToken: string; expiresAt: number } | undefined;
+	/** One refresh in flight, shared by every concurrent caller. */
+	private refreshing: Promise<string> | undefined;
 
 	constructor(io: Io) {
 		this.io = io;
@@ -151,9 +163,39 @@ export class Auth {
 		return join(this.dir, "pending.json");
 	}
 
+	/** The token file, parsed once until `rememberToken` (this process wrote it, or logout). */
+	private loadTokenFile(): AuthorizedUser | undefined {
+		if (!this.tokenLoaded) {
+			this.tokenRaw = readJson<AuthorizedUser>(this.tokenPath);
+			this.tokenUnreadable = this.tokenRaw === undefined && this.shared && existsSync(this.tokenPath);
+			this.tokenLoaded = true;
+		}
+		return this.tokenRaw;
+	}
+
+	private rememberToken(raw: AuthorizedUser | undefined): void {
+		this.tokenRaw = raw;
+		this.tokenLoaded = true;
+		this.tokenUnreadable = false;
+	}
+
+	private loadCache(): Cache | undefined {
+		if (!this.cacheLoaded) {
+			this.cacheRaw = readJson<Cache>(this.cachePath);
+			this.cacheLoaded = true;
+		}
+		return this.cacheRaw;
+	}
+
+	private rememberCache(cache: Cache | undefined): void {
+		this.cacheRaw = cache;
+		this.cacheLoaded = true;
+		this.memory = undefined;
+	}
+
 	token(): AuthorizedUser | undefined {
-		const token = readJson<AuthorizedUser>(this.tokenPath);
-		if (this.shared && existsSync(this.tokenPath) && !token) {
+		const token = this.loadTokenFile();
+		if (this.tokenUnreadable) {
 			throw new CliError(`GOOGLE_TOKEN_FILE (${this.tokenPath}) is not readable JSON. Check the path and file permissions.`);
 		}
 		return token?.refresh_token ? token : undefined;
@@ -162,14 +204,14 @@ export class Auth {
 	client(): Client | undefined {
 		const fromFile = parseClient(readJson(this.clientPath));
 		if (fromFile) return fromFile;
-		const token = readJson<AuthorizedUser>(this.tokenPath);
+		const token = this.loadTokenFile();
 		const fromToken = parseClient(token);
 		return fromToken ? { ...fromToken, tokenUri: token?.token_uri ?? DEFAULT_TOKEN_URI } : undefined;
 	}
 
 	grantedScopes(): string[] | undefined {
 		const token = this.token();
-		return scopeList(token?.scopes) ?? scopeList(token?.scope) ?? scopeList(readJson<Cache>(this.cachePath)?.scope);
+		return scopeList(token?.scopes) ?? scopeList(token?.scope) ?? scopeList(this.loadCache()?.scope);
 	}
 
 	require(capability: Capability): void {
@@ -280,32 +322,70 @@ export class Auth {
 		writePrivate(this.tokenPath, `${JSON.stringify(token, null, 2)}\n`);
 		rmSync(this.pendingPath, { force: true });
 		rmSync(this.cachePath, { force: true });
+		this.rememberToken(token);
+		this.rememberCache(undefined);
 		return token;
 	}
 
 	setAccount(account: string): void {
 		if (this.shared) return;
 		const token = this.token();
-		if (token) writePrivate(this.tokenPath, `${JSON.stringify({ ...token, account }, null, 2)}\n`);
+		if (!token) return;
+		const updated = { ...token, account };
+		writePrivate(this.tokenPath, `${JSON.stringify(updated, null, 2)}\n`);
+		this.rememberToken(updated);
 	}
 
 	logout(): void {
 		if (this.shared) throw new CliError("GOOGLE_TOKEN_FILE is set; Nano never deletes a shared token. Unset the variable instead.");
 		for (const name of ["token.json", "cache.json", "pending.json"]) rmSync(join(this.dir, name), { force: true });
+		this.rememberToken(undefined);
+		this.rememberCache(undefined);
 	}
 
-	/** A valid access token. `force` skips every cache and uses the refresh token (keepalive). */
+	/**
+	 * A valid access token. The token file and `cache.json` are read once per process, then kept
+	 * in memory until this process changes them. `force` skips every cache and uses the refresh
+	 * token (keepalive). Concurrent callers share one in-flight refresh.
+	 */
 	async accessToken(force = false): Promise<string> {
+		if (!force) {
+			const hit = this.cachedAccess();
+			if (hit) return hit;
+		}
+		if (!this.refreshing) {
+			this.refreshing = this.refresh().finally(() => {
+				this.refreshing = undefined;
+			});
+		}
+		return this.refreshing;
+	}
+
+	/** Access token from memory, the token file, or `cache.json`, when it is still fresh. */
+	private cachedAccess(): string | undefined {
+		const now = this.io.now();
+		if (this.memory && this.memory.expiresAt > now + EARLY_REFRESH_MS) return this.memory.accessToken;
+		const token = this.token();
+		if (!token?.refresh_token) return undefined;
+		const own = token.token ?? token.access_token;
+		const ownExp = parseExpiry(token.expiry);
+		if (own && ownExp > now + EARLY_REFRESH_MS) {
+			this.memory = { accessToken: own, expiresAt: ownExp };
+			return own;
+		}
+		const cache = this.loadCache();
+		if (cache?.fingerprint === fingerprint(token.refresh_token) && cache.expiresAt > now + EARLY_REFRESH_MS) {
+			this.memory = { accessToken: cache.accessToken, expiresAt: cache.expiresAt };
+			return cache.accessToken;
+		}
+		return undefined;
+	}
+
+	private async refresh(): Promise<string> {
 		const token = this.token();
 		if (!token?.refresh_token) throw this.notConnected();
 		const now = this.io.now();
 		const fp = fingerprint(token.refresh_token);
-		if (!force) {
-			const own = token.token ?? token.access_token;
-			if (own && parseExpiry(token.expiry) > now + EARLY_REFRESH_MS) return own;
-			const cache = readJson<Cache>(this.cachePath);
-			if (cache?.fingerprint === fp && cache.expiresAt > now + EARLY_REFRESH_MS) return cache.accessToken;
-		}
 		const client = this.client();
 		if (!client) throw new CliError("The token has no client_id/client_secret and no client file is configured (GOOGLE_CLIENT_SECRET_FILE).");
 		let response: TokenResponse;
@@ -333,8 +413,13 @@ export class Auth {
 			scope: response.scope,
 		};
 		writePrivate(this.cachePath, JSON.stringify(cache));
+		this.cacheRaw = cache;
+		this.cacheLoaded = true;
+		this.memory = { accessToken: response.access_token, expiresAt: cache.expiresAt };
 		if (response.refresh_token && response.refresh_token !== token.refresh_token && !this.shared) {
-			writePrivate(this.tokenPath, `${JSON.stringify({ ...token, refresh_token: response.refresh_token }, null, 2)}\n`);
+			const updated = { ...token, refresh_token: response.refresh_token };
+			writePrivate(this.tokenPath, `${JSON.stringify(updated, null, 2)}\n`);
+			this.rememberToken(updated);
 		}
 		return response.access_token;
 	}
