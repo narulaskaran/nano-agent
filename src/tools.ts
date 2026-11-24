@@ -6,6 +6,7 @@ import type { Channel } from "./channel.ts";
 import { type Config, currentTimezone } from "./config.ts";
 import { ask, askLocal, type ChatFn } from "./local.ts";
 import { chooseModel, getMainModel } from "./models.ts";
+import { DEFAULT_PDF_DPI, DEFAULT_PDF_PAGES, MAX_PDF_DPI, MAX_PDF_PAGES, MIN_PDF_DPI, viewPdf } from "./pdf.ts";
 import { cronMatches, type Job, parseLocalTime, type Scheduler } from "./scheduler.ts";
 import { workspaceDir } from "./session.ts";
 
@@ -257,6 +258,29 @@ export function nanoTools(
 				if (!existsSync(path)) throw new Error(`No such file: ${path}`);
 				await channel.sendFile(spaceId, path, params.caption, { asVoice: params.as_voice });
 				return text(extra.worker ? `Attached ${path} to your result` : `Sent ${path}`);
+			},
+		});
+
+		pi.registerTool({
+			name: "view_pdf",
+			label: "View PDF",
+			description: [
+				"Render pages of a PDF file as images so you can inspect them directly with vision.",
+				"Use this whenever you need to check or read a PDF — especially signatures, filled forms, checkboxes, handwriting, scans, tables or layout. Do not inspect raw PDF bytes or install Python PDF libraries.",
+				`Defaults to the first ${DEFAULT_PDF_PAGES} pages (max ${MAX_PDF_PAGES} per call) at ${DEFAULT_PDF_DPI} DPI. Pass \`pages\` (e.g. "1", "2-4", "1,5") for other pages and \`dpi\` (${MIN_PDF_DPI}-${MAX_PDF_DPI}) for finer detail.`,
+			].join("\n"),
+			parameters: Type.Object({
+				path: Type.String({ description: "Absolute path, or relative to the workspace" }),
+				pages: Type.Optional(
+					Type.String({
+						description: `1-indexed pages or ranges to render, e.g. "1", "1-3", "2,4". Default: first ${DEFAULT_PDF_PAGES} pages (max ${MAX_PDF_PAGES} per call).`,
+					}),
+				),
+				dpi: Type.Optional(Type.Number({ description: `Render resolution in DPI (${MIN_PDF_DPI}-${MAX_PDF_DPI}, default ${DEFAULT_PDF_DPI}).` })),
+			}),
+			async execute(_id, params, signal, _onUpdate, ctx) {
+				const path = workspacePath(config, params.path);
+				return await viewPdf(path, { pages: params.pages, dpi: params.dpi }, { signal, model: ctx?.model });
 			},
 		});
 
