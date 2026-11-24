@@ -1,16 +1,16 @@
-import { decide, top, type Transport } from "./decide.ts";
-import { isTransient } from "./transient.ts";
+import { confident, type Decider, DecisionError, top } from "./decide.ts";
 
 /**
  * Sorting a failed scheduled run with a decision instead of a regex:
- * - transient:   clears on its own, so wait for the next run;
- * - fixable:     a repair worker can fix the job's script, state or inputs;
- * - owner:       only the owner can fix it (a login, an account, money), so a repair would be wasted;
- * - unavailable: the decision service itself failed transiently (e.g. network or provider outage), so wait instead of repairing.
- * Undefined when the decision is unsure or fails non-transiently; the caller then falls back to its regex.
+ * - transient: clears on its own, so wait for the next run. Also what triage itself returns when the
+ *              decision call failed transiently (network, timeout, 429, 5xx), with no probability;
+ * - fixable:   a repair worker can fix the job's script, state or inputs;
+ * - owner:     only the owner can fix it (a login, an account, money), so a repair would be wasted.
+ * Undefined when the decision is unsure, the input is private, or the decision fails for good.
+ * The caller then falls back to its regex.
  */
 export type FailureKind = "transient" | "fixable" | "owner";
-export type TriageResult = { kind: FailureKind; p: number } | { kind: "unavailable" };
+export type TriageResult = { kind: FailureKind; p?: number };
 
 export const TRIAGE_MIN = 0.8;
 /**
@@ -19,22 +19,16 @@ export const TRIAGE_MIN = 0.8;
  */
 export const OWNER_MIN = 0.9;
 
-function errorText(error: unknown): string {
-	if (!(error instanceof Error)) return String(error);
-	const cause = (error as Error & { cause?: { code?: unknown; message?: unknown } }).cause;
-	return [error.message, cause?.code, cause?.message].filter((p): p is string => typeof p === "string" && p.length > 0).join(" ");
-}
-
 export async function triageFailure(input: {
 	name: string;
 	kind: string;
 	error: string;
 	source: string;
-	logPath?: string;
-	transport?: Transport;
+	decider: Decider;
+	private?: boolean;
 }): Promise<TriageResult | undefined> {
 	try {
-		const response = await decide(
+		const response = await input.decider.decide(
 			{
 				state: { job: input.name, job_kind: input.kind, error: input.error.slice(0, 1500) },
 				questions: {
@@ -49,15 +43,18 @@ export async function triageFailure(input: {
 					},
 				},
 			},
-			{ transport: input.transport, logPath: input.logPath, source: input.source, signal: AbortSignal.timeout(10_000) },
+			{ source: input.source, signal: AbortSignal.timeout(10_000), private: input.private },
 		);
-		const best = top(response.answers.failure as NonNullable<(typeof response.answers)[string]>);
-		if (best.p < (best.label === "owner" ? OWNER_MIN : TRIAGE_MIN)) return undefined;
-		return { kind: best.label as FailureKind, p: best.p };
+		const answer = response.answers.failure;
+		const label = confident(answer, { transient: TRIAGE_MIN, fixable: TRIAGE_MIN, owner: OWNER_MIN });
+		if (!label || !answer) return undefined;
+		return { kind: label as FailureKind, p: top(answer).p };
 	} catch (error) {
-		const reason = errorText(error);
-		console.error("nano: failure triage unavailable:", reason.slice(0, 200));
-		if (isTransient(reason)) return { kind: "unavailable" };
+		// Private input is refused before the request. The caller falls back to its regex on the job's own error.
+		if (error instanceof DecisionError && error.reason === "private") return undefined;
+		const message = error instanceof Error ? error.message : String(error);
+		console.error("nano: failure triage unavailable:", message.slice(0, 200));
+		if (error instanceof DecisionError && error.reason === "transient") return { kind: "transient" };
 		return undefined;
 	}
 }

@@ -1,4 +1,4 @@
-import { decide, type DecisionRequest, top, type Transport } from "./decide.ts";
+import { confident, type Decider, type DecisionRequest, DecisionError, LOG_MAX_BYTES, top } from "./decide.ts";
 import { appendJsonLine } from "./json-store.ts";
 
 /**
@@ -76,16 +76,20 @@ export async function runGate(input: {
 	now: number;
 	timeZone: string;
 	source: string;
-	logPath: string;
-	transport?: Transport;
+	decider: Decider;
+	private?: boolean;
 }): Promise<GateVerdict> {
 	try {
-		const response = await decide(gateRequest(input), { transport: input.transport, logPath: input.logPath, source: input.source });
-		const best = top(response.answers.notify as NonNullable<(typeof response.answers)[string]>);
-		const quiet = best.label === "quiet" && best.p >= (input.gate.min ?? DEFAULT_MIN);
+		const response = await input.decider.decide(gateRequest(input), { source: input.source, private: input.private });
+		const answer = response.answers.notify;
+		if (!answer) throw new DecisionError("invalid", "decision failed: no choice answer for notify");
+		const best = top(answer);
+		const quiet = confident(answer, input.gate.min ?? DEFAULT_MIN) === "quiet";
 		return { notify: !quiet, p: best.p, answer: best.label === "quiet" ? "quiet" : "notify" };
 	} catch (error) {
-		return { notify: true, p: 0, answer: "error", error: ((error as Error)?.message ?? String(error)).slice(0, 300) };
+		// A private job is refused before the request. It goes through, the same as a failed gate.
+		const message = error instanceof DecisionError && error.reason === "private" ? "private job: not sent to the gate" : ((error as Error)?.message ?? String(error));
+		return { notify: true, p: 0, answer: "error", error: message.slice(0, 300) };
 	}
 }
 
@@ -97,5 +101,5 @@ export function rememberSent(sent: GateSent[] | undefined, text: string, at: num
 
 /** One line per gate event in <data>/gate.jsonl: verdicts, and what the agent did after, for tuning `min`. No output text. */
 export function logGate(path: string, entry: Record<string, unknown>): void {
-	appendJsonLine(path, { at: new Date().toISOString(), ...entry }, "gate");
+	appendJsonLine(path, { at: new Date().toISOString(), ...entry }, "gate", LOG_MAX_BYTES);
 }

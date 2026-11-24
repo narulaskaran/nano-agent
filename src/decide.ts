@@ -1,6 +1,8 @@
 import { createHash } from "node:crypto";
+import { join } from "node:path";
 import { appendJsonLine } from "./json-store.ts";
 import { providerFetch, providerSettingsAvailable } from "./provider-client.ts";
+import { isTransient } from "./transient.ts";
 
 /**
  * Typed decisions from the decision model: any endpoint that speaks the System One API (`{model, state,
@@ -15,7 +17,31 @@ export const DECIDE_MODEL = "typesafe/jev-1.14";
 const OPENROUTER_DECISIONS = "https://openrouter.ai/api/v1/systemone";
 /** OpenRouter's routing for decisions: zero data retention, no training on the request. */
 const OPENROUTER_ZDR = { zdr: true, data_collection: "deny" };
-const LOG_MAX_BYTES = 5 * 1024 * 1024;
+/** Cap for the decision, router and gate logs. A log over this moves to `<path>.1`. */
+export const LOG_MAX_BYTES = 5 * 1024 * 1024;
+
+/** `<data>/decisions.jsonl`. The only place that path is built. */
+export function decisionLogPath(dataDir: string): string {
+	return join(dataDir, "decisions.jsonl");
+}
+
+/**
+ * Why `decide` failed, as data. Callers branch on `reason` and do not read the message.
+ * - unconfigured: nothing to call (no vault route, decision URL or OpenRouter key)
+ * - transient:    the call did not get an answer (network, timeout, 429, 5xx) and is worth retrying
+ * - invalid:      the call returned something that is not a usable answer
+ * - private:      the input was refused before any request, because this decider does not send private material
+ */
+export type DecisionErrorReason = "unconfigured" | "transient" | "invalid" | "private";
+
+export class DecisionError extends Error {
+	readonly reason: DecisionErrorReason;
+	constructor(reason: DecisionErrorReason, message: string, options?: ErrorOptions) {
+		super(message, options);
+		this.name = "DecisionError";
+		this.reason = reason;
+	}
+}
 
 export type Question =
 	| { type: "noul"; instructions: string; criteria?: { true?: string; false?: string } }
@@ -123,24 +149,37 @@ export interface DecideOptions {
 
 export async function decide(request: DecisionRequest, options: DecideOptions = {}): Promise<DecisionResponse> {
 	validateRequest(request);
-	const transport = options.transport ?? decisionTransport();
+	// A transport key that is present and undefined means "there is no model", not "look one up".
+	const transport = Object.hasOwn(options, "transport") ? options.transport : decisionTransport();
 	if (!transport)
-		throw new Error("no decision model is configured: it needs a vault decision connection, NANO_DECIDE_URL with NANO_DECIDE_MODEL, or OPENROUTER_API_KEY");
+		throw new DecisionError(
+			"unconfigured",
+			"no decision model is configured: it needs a vault decision connection, NANO_DECIDE_URL with NANO_DECIDE_MODEL, or OPENROUTER_API_KEY",
+		);
 	const now = options.now ?? Date.now;
 	const started = now();
-	const out = await transport(JSON.stringify({ state: request.state, questions: request.questions }), options.signal);
-	if (out.status !== 200) throw new Error(`decision failed: HTTP ${out.status} ${out.text.slice(0, 300)}`);
+	let out: { status: number; text: string };
+	try {
+		out = await transport(JSON.stringify({ state: request.state, questions: request.questions }), options.signal);
+	} catch (error) {
+		if (error instanceof DecisionError) throw error;
+		throw new DecisionError(isTransientFailure(error) ? "transient" : "invalid", describeFailure(error), { cause: error });
+	}
+	if (out.status !== 200) {
+		const message = `decision failed: HTTP ${out.status} ${out.text.slice(0, 300)}`;
+		throw new DecisionError(out.status === 408 || out.status === 429 || out.status >= 500 ? "transient" : "invalid", message);
+	}
 	let parsed: DecisionResponse;
 	try {
 		parsed = JSON.parse(out.text) as DecisionResponse;
 	} catch {
-		throw new Error("decision failed: the response was not JSON");
+		throw new DecisionError("invalid", "decision failed: the response was not JSON");
 	}
 	for (const [id, q] of Object.entries(request.questions)) {
 		const answer = parsed.answers?.[id];
-		if (!answer || answer.type !== q.type) throw new Error(`decision failed: no ${q.type} answer for ${id}`);
+		if (!answer || answer.type !== q.type) throw new DecisionError("invalid", `decision failed: no ${q.type} answer for ${id}`);
 		if (answer.type === "choice" && !Object.hasOwn((q as { criteria: Record<string, string> }).criteria, answer.choice)) {
-			throw new Error(`decision failed: ${id} answered "${answer.choice}", which is not one of its options`);
+			throw new DecisionError("invalid", `decision failed: ${id} answered "${answer.choice}", which is not one of its options`);
 		}
 	}
 	if (options.logPath) {
@@ -162,6 +201,41 @@ export async function decide(request: DecisionRequest, options: DecideOptions = 
 	return parsed;
 }
 
+export interface DecisionCall {
+	source?: string;
+	signal?: AbortSignal;
+	now?: () => number;
+	/** This input is private and must not leave the machine when the decider refuses private input. */
+	private?: boolean;
+}
+
+/**
+ * One configured way to ask for a decision: the transport, the decisions log, and whether private input is refused.
+ * Built once from config and shared by the router, the gate and failure triage.
+ */
+export interface Decider {
+	/** Throws DecisionError reason "private" when this input must not be sent. */
+	allow(input?: { private?: boolean }): void;
+	decide(request: DecisionRequest, call?: DecisionCall): Promise<DecisionResponse>;
+}
+
+export function createDecider(options: { dataDir: string; transport?: Transport; refusePrivate?: boolean }): Decider {
+	const explicitTransport = Object.hasOwn(options, "transport");
+	const logPath = decisionLogPath(options.dataDir);
+	const refusePrivate = options.refusePrivate ?? true;
+	const allow = (input?: { private?: boolean }): void => {
+		if (refusePrivate && input?.private) throw new DecisionError("private", "private input is not sent to the decision model");
+	};
+	return {
+		allow,
+		async decide(request, call = {}) {
+			allow(call);
+			const transport = explicitTransport ? options.transport : decisionTransport();
+			return decide(request, { transport, logPath, source: call.source, signal: call.signal, now: call.now });
+		},
+	};
+}
+
 export interface Top {
 	/** The chosen option id; "yes"/"no" for a yes/no question; the level number for a score. */
 	label: string;
@@ -177,6 +251,41 @@ export function top(answer: Answer): Top {
 	if (probabilities.length === 0) return { label: String(Math.round(answer.score)), p: answer.confidence ?? 0 };
 	const [label, p] = probabilities.reduce((best, entry) => (entry[1] > best[1] ? entry : best));
 	return { label, p };
+}
+
+/**
+ * The answer's label when it is sure enough, otherwise undefined.
+ * A number is one bar for every label. A record is the bar for each label, and a label with no entry is not confident.
+ */
+export function confident(answer: Answer | undefined, min: number | Record<string, number>): string | undefined {
+	if (!answer) return undefined;
+	const best = top(answer);
+	const bar = typeof min === "number" ? min : min[best.label];
+	if (bar === undefined || best.p < bar) return undefined;
+	return best.label;
+}
+
+/** Text of a thrown failure, including a cause code, for the error message and the log. */
+function describeFailure(error: unknown): string {
+	if (!(error instanceof Error)) return String(error);
+	const cause = (error as Error & { cause?: { code?: unknown; message?: unknown } }).cause;
+	return [error.message, cause?.code, cause?.message].filter((part): part is string => typeof part === "string" && part.length > 0).join(" ");
+}
+
+/** A thrown transport error that is a timeout or a network failure, rather than a bad answer. */
+function isTransientFailure(error: unknown): boolean {
+	const seen = new Set<unknown>();
+	const visit = (value: unknown): boolean => {
+		if (value === null || value === undefined || seen.has(value)) return false;
+		if (typeof value !== "object") return typeof value === "string" && isTransient(value);
+		seen.add(value);
+		const record = value as { name?: unknown; code?: unknown; message?: unknown; cause?: unknown };
+		if (record.name === "TimeoutError" || record.name === "AbortError") return true;
+		if (typeof record.code === "string" && isTransient(record.code)) return true;
+		if (typeof record.message === "string" && isTransient(record.message)) return true;
+		return visit(record.cause);
+	};
+	return visit(error);
 }
 
 export function stateFingerprint(state: DecisionRequest["state"]): { sha256: string; chars: number } {

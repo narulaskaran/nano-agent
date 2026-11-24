@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
-import { buildQuestion, decide, type DecisionRequest, top } from "./decide.ts";
+import { buildQuestion, createDecider, type DecisionRequest, DecisionError, top } from "./decide.ts";
 
 const USAGE = `usage: nano-decide [options] "<question>" [file]
 Asks the decision model one question about a file or stdin and prints the answer. Not for private
@@ -55,10 +55,10 @@ async function main(): Promise<number> {
 		? (JSON.parse(input) as DecisionRequest)
 		: { state: input, questions: { answer: buildQuestion(first as string, values) } };
 	const appDir = resolve(dirname(fileURLToPath(import.meta.url)), "..");
-	const logPath = join(resolve(process.env.NANO_DATA_DIR ?? join(appDir, "data")), "decisions.jsonl");
+	const dataDir = resolve(process.env.NANO_DATA_DIR ?? join(appDir, "data"));
 	const source = values.source ?? (process.env.NANO_DECIDE_SOURCE || undefined);
-	const response = await decide(request, { logPath, source }).catch((error: Error) => {
-		if (/no decision model is configured/.test(error.message)) {
+	const response = await createDecider({ dataDir, refusePrivate: true }).decide(request, { source }).catch((error: unknown) => {
+		if (error instanceof DecisionError && error.reason === "unconfigured") {
 			console.error(`nano-decide: ${error.message}`);
 			process.exit(2);
 		}
@@ -69,7 +69,8 @@ async function main(): Promise<number> {
 		process.stdout.write(`${JSON.stringify(response)}\n`);
 		return 0;
 	}
-	const answer = response.answers.answer as NonNullable<(typeof response.answers)[string]>;
+	const answer = response.answers.answer;
+	if (!answer) throw new Error("decision failed: no answer");
 	const best = top(answer);
 	if (values.json) process.stdout.write(`${JSON.stringify({ ...best, answer, model: response.model })}\n`);
 	if (min !== undefined && best.p < min) throw new Uncertain(`uncertain: ${best.label} at ${best.p.toFixed(2)}, below ${min}`);

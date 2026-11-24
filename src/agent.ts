@@ -4,7 +4,7 @@ import type { AgentSession, ModelRuntime } from "@earendil-works/pi-coding-agent
 import { Type } from "typebox";
 import { baseMessageId, type Channel, clip, type Inbound, type Revision } from "./channel.ts";
 import { type Config, currentTimezone, localStamp } from "./config.ts";
-import { decisionTransport, type Transport } from "./decide.ts";
+import { createDecider, type Decider } from "./decide.ts";
 import { readJsonFile, writeJsonFile } from "./json-store.ts";
 import { getMainModel } from "./models.ts";
 import { refreshProviderSettings } from "./provider-settings.ts";
@@ -172,8 +172,8 @@ interface RunState {
 const DELIVERED_KEEP = 5;
 
 export interface ConversationOptions {
-	/** How the router's decisions are made; defaults to decide.ts's transport. For tests. */
-	decisionTransport?: Transport;
+	/** Router decisions, used only when the router is on. Tests inject a fake. */
+	decider?: Decider;
 }
 
 export class Conversation {
@@ -204,7 +204,7 @@ export class Conversation {
 	private unanswered: string[] = [];
 	/** Owner messages are routed one at a time, in arrival order. */
 	private routing: Promise<void> = Promise.resolve();
-	private readonly router?: Transport;
+	private readonly decider?: Decider;
 	/** Skills already put into this session's prompts by the router. */
 	private injectedSkills = new Set<string>();
 
@@ -219,7 +219,7 @@ export class Conversation {
 		options: ConversationOptions = {},
 	) {
 		this.spaceId = spaceId;
-		this.router = config.router ? (options.decisionTransport ?? decisionTransport()) : undefined;
+		this.decider = config.router ? (options.decider ?? createDecider({ dataDir: config.dataDir, refusePrivate: true })) : undefined;
 		this.config = config;
 		this.channel = channel;
 		this.store = store;
@@ -321,14 +321,11 @@ export class Conversation {
 	 * start a turn of its own is routed: one that joins or waits behind a running turn keeps today's handling.
 	 */
 	private async routeOwner(work: Work & { from: "owner" }, before: { recent: RecentTurn[]; lastActivity: number }, hasFiles: boolean): Promise<void> {
-		if (!this.router || this.run || this.queue.busy) return this.dispatch(work);
+		if (!this.decider || this.run || this.queue.busy) return this.dispatch(work);
 		const now = Date.now();
 		const running = this.tasks.active().map((t) => ({ id: t.id, title: t.title }));
 		const skills = listSkills(this.config);
-		const decision = await route(
-			{ message: work.spoken, recent: before.recent, now, running, skills },
-			{ transport: this.router, logPath: join(this.config.dataDir, "decisions.jsonl") },
-		);
+		const decision = await route({ message: work.spoken, recent: before.recent, now, running, skills }, { decider: this.decider });
 		const actions: string[] = [];
 		// Something may have started while the decision was being made; then the message joins it as usual.
 		const free = !this.run && !this.queue.busy;

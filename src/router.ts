@@ -1,4 +1,4 @@
-import { type Answer, decide, type DecisionRequest, top, type Transport } from "./decide.ts";
+import { confident, type Decider, type DecisionRequest, LOG_MAX_BYTES, top } from "./decide.ts";
 import { appendJsonLine } from "./json-store.ts";
 
 /**
@@ -157,25 +157,28 @@ export function routeRequest(input: RouteInput): DecisionRequest {
 	};
 }
 
-export async function route(input: RouteInput, options: { transport?: Transport; logPath?: string; now?: () => number } = {}): Promise<Route> {
+export async function route(input: RouteInput, options: { decider: Decider; now?: () => number }): Promise<Route> {
 	const now = options.now ?? Date.now;
 	const started = now();
 	const fallback = (error: string): Route => ({ noReply: false, long: false, newTopic: false, simple: false, remember: false, answers: {}, ms: now() - started, error: error.slice(0, 300) });
 	try {
-		const response = await decide(routeRequest(input), { transport: options.transport, logPath: options.logPath, source: "router", signal: AbortSignal.timeout(TIMEOUT_MS) });
+		const response = await options.decider.decide(routeRequest(input), { source: "router", signal: AbortSignal.timeout(TIMEOUT_MS) });
 		const answers: Route["answers"] = {};
-		for (const [id, answer] of Object.entries(response.answers)) answers[id] = top(answer as Answer);
-		const is = (id: string, label: string, min: number) => answers[id]?.label === label && (answers[id]?.p ?? 0) >= min;
-		const picked = (id: string, min: number) => (answers[id] && answers[id].label !== "none" && answers[id].p >= min ? answers[id].label : undefined);
+		for (const [id, answer] of Object.entries(response.answers)) answers[id] = top(answer);
+		const chosen = (id: string, min: number | Record<string, number>) => confident(response.answers[id], min);
+		const named = (id: string, min: number) => {
+			const label = chosen(id, min);
+			return label && label !== "none" ? label : undefined;
+		};
 		return {
-			noReply: is("reply", "none", NO_REPLY_MIN),
-			long: is("effort", "long", LONG_MIN),
-			newTopic: is("topic", "new", NEW_TOPIC_MIN),
-			skill: picked("skill", SKILL_MIN),
+			noReply: chosen("reply", { none: NO_REPLY_MIN }) === "none",
+			long: chosen("effort", { long: LONG_MIN }) === "long",
+			newTopic: chosen("topic", { new: NEW_TOPIC_MIN }) === "new",
+			skill: named("skill", SKILL_MIN),
 			// Never without thought for work that is long, whatever depth says.
-			simple: is("depth", "simple", SIMPLE_MIN) && !is("effort", "long", 0.5),
-			remember: is("remember", "yes", REMEMBER_MIN),
-			task: picked("task", TASK_MIN),
+			simple: chosen("depth", { simple: SIMPLE_MIN }) === "simple" && chosen("effort", { long: 0.5 }) !== "long",
+			remember: chosen("remember", { yes: REMEMBER_MIN }) === "yes",
+			task: named("task", TASK_MIN),
 			answers,
 			ms: now() - started,
 		};
@@ -186,5 +189,5 @@ export async function route(input: RouteInput, options: { transport?: Transport;
 
 /** One line per routed message in <data>/router.jsonl: answers, probabilities and actions, never the text. */
 export function logRoute(path: string, entry: Record<string, unknown>): void {
-	appendJsonLine(path, { at: new Date().toISOString(), ...entry }, "router");
+	appendJsonLine(path, { at: new Date().toISOString(), ...entry }, "router", LOG_MAX_BYTES);
 }

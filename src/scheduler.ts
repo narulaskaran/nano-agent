@@ -3,7 +3,7 @@ import { randomBytes } from "node:crypto";
 import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { type Config, currentTimezone } from "./config.ts";
-import type { Transport } from "./decide.ts";
+import { createDecider, type Decider, DecisionError } from "./decide.ts";
 import { type Gate, type GateSent, type GateVerdict, logGate, rememberSent, runGate, validateGate } from "./gate.ts";
 import { readJsonFile, writeJsonFile } from "./json-store.ts";
 import { isSilent } from "./tasks.ts";
@@ -47,8 +47,8 @@ export interface Job {
 }
 
 export interface SchedulerOptions {
-	/** How gate decisions are made; defaults to decide.ts's transport. For tests. */
-	decisionTransport?: Transport;
+	/** Gate decisions and failure triage. Defaults to one built from config. Tests inject a fake. */
+	decider?: Decider;
 }
 
 /**
@@ -207,12 +207,12 @@ export class Scheduler {
 	private badCron = new Set<string>();
 	private readonly config: Config;
 	private readonly sink: JobSink;
-	private readonly options: SchedulerOptions;
+	private readonly decider: Decider;
 
 	constructor(config: Config, sink: JobSink, options: SchedulerOptions = {}) {
 		this.config = config;
 		this.sink = sink;
-		this.options = options;
+		this.decider = options.decider ?? createDecider({ dataDir: config.dataDir, refusePrivate: true });
 		this.path = join(config.dataDir, "schedule.json");
 		const stored = readJsonFile<{ jobs?: Job[] } | null>(this.path, null);
 		if (Array.isArray(stored?.jobs)) this.jobs = stored.jobs;
@@ -236,9 +236,16 @@ export class Scheduler {
 		if (input.cron) cronMatches(input.cron, new Date(), currentTimezone(this.config)); // validates
 		if (input.gate) {
 			if (input.kind !== "script") throw new Error('a gate judges script output, so it needs kind "script"');
-			// The decision model may be a cloud service; private material must not reach it.
-			if (input.private) throw new Error("a private job cannot have a gate: the decision model may be a cloud service");
 			validateGate(input.gate);
+			// The decision model may be a cloud service. The decider is the one place that refuses private input.
+			try {
+				this.decider.allow({ private: input.private });
+			} catch (error) {
+				if (error instanceof DecisionError && error.reason === "private") {
+					throw new Error("a private job cannot have a gate: the decision model may be a cloud service");
+				}
+				throw error;
+			}
 		}
 		const job: Job = { ...input, id: randomBytes(3).toString("hex"), createdAt: Date.now() };
 		this.jobs.push(job);
@@ -425,16 +432,14 @@ export class Scheduler {
 	private async failed(job: Job, error: string, now: number): Promise<void> {
 		const health = this.noteFailure(job, error, now);
 		if (health.escalated) return;
-		// A decision sorts the failure; when it is unsure or unavailable (or the job is private), the regex does.
-		const triage = job.private
-			? undefined
-			: await triageFailure({ name: job.name, kind: job.kind, error, source: `triage:${job.id}`, logPath: join(this.config.dataDir, "decisions.jsonl"), transport: this.options.decisionTransport });
-		if (triage && triage.kind !== "unavailable") console.error(`nano: job ${job.id} (${job.name}) failure looks ${triage.kind} (${triage.p.toFixed(2)})`);
+		// A decision sorts the failure. Unsure, refused (private) or failed for good falls back to the regex.
+		const triage = await triageFailure({ name: job.name, kind: job.kind, error, source: `triage:${job.id}`, decider: this.decider, private: job.private });
+		if (triage?.p !== undefined) console.error(`nano: job ${job.id} (${job.name}) failure looks ${triage.kind} (${triage.p.toFixed(2)})`);
 		if (triage?.kind === "owner") {
 			// A repair cannot fix a login, an account or money, so the owner hears now instead of after a wasted repair.
 			return this.escalate(job, health, "is failing and needs you");
 		}
-		const transient = triage ? triage.kind === "transient" || triage.kind === "unavailable" : isTransient(error);
+		const transient = triage ? triage.kind === "transient" : isTransient(error);
 		const lasting = !transient || health.failures >= TRANSIENT_RUNS || now - (health.since ?? now) >= TRANSIENT_MS;
 		if (!lasting) return;
 		if (health.repairAt === undefined) {
@@ -515,19 +520,17 @@ export class Scheduler {
 	/** Ask the gate about this output and log the verdict. Never throws: a failed gate lets the output through. */
 	private async gate(job: Job, output: string, now: number): Promise<GateVerdict> {
 		const gate = job.gate as Gate;
-		const verdict: GateVerdict = job.private
-			? { notify: true, p: 0, answer: "error", error: "private job: not sent to the gate" }
-			: await runGate({
-					name: job.name,
-					output,
-					gate,
-					sent: job.gateSent,
-					now,
-					timeZone: currentTimezone(this.config),
-					source: `gate:${job.id}`,
-					logPath: join(this.config.dataDir, "decisions.jsonl"),
-					transport: this.options.decisionTransport,
-				});
+		const verdict: GateVerdict = await runGate({
+			name: job.name,
+			output,
+			gate,
+			sent: job.gateSent,
+			now,
+			timeZone: currentTimezone(this.config),
+			source: `gate:${job.id}`,
+			decider: this.decider,
+			private: job.private,
+		});
 		const action = verdict.notify ? "go" : gate.shadow ? "go (shadow)" : "quiet";
 		logGate(this.gateLogPath(), { job: job.id, gate: verdict.answer, p: Number(verdict.p.toFixed(3)), min: gate.min, shadow: gate.shadow || undefined, action, error: verdict.error, chars: output.length });
 		console.error(`nano: gate on job ${job.id} (${job.name}): ${verdict.answer}${verdict.p ? ` ${verdict.p.toFixed(2)}` : ""} -> ${action}${verdict.error ? ` (${verdict.error})` : ""}`);
