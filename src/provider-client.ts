@@ -2,6 +2,7 @@
 import http from "node:http";
 import { existsSync } from "node:fs";
 
+// Keep in sync with VAULT_SOCKET in packs/vault/lib/paths.mjs.
 export const PROVIDER_SOCKET = "/run/nano-vault/vault.sock";
 export const providerSettingsAvailable = () => existsSync(PROVIDER_SOCKET);
 

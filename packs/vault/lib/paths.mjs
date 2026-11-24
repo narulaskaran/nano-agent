@@ -5,6 +5,7 @@
 export const VAULT_UID = 10001;
 export const VAULT_GID = 10001;
 export const VAULT_RUN_DIR = "/run/nano-vault";
+// Keep in sync with PROVIDER_SOCKET in src/provider-client.ts.
 export const VAULT_SOCKET = "/run/nano-vault/vault.sock";
 export const DEFAULT_VAULT_DIR = "/vault";
 export const DEFAULT_DOWNLOADS = "/var/lib/nano-vault/downloads";
