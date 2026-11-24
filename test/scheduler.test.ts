@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { carryOver, isIdle } from "../src/agent.ts";
 import { chooseFormat } from "../src/channel.ts";
-import { cronMatches, parseLocalTime } from "../src/scheduler.ts";
+import { cronMatches, parseLocalTime, zonedParts } from "../src/scheduler.ts";
 import { htmlToText } from "../src/tools.ts";
 
 const NY = "America/New_York";
@@ -30,6 +30,17 @@ test("cron with both day fields set fires when either matches", () => {
 	const wed = new Date("2026-11-11T14:00:00Z");
 	assert.equal(cronMatches("0 9 1 * 3", wed, NY), true);
 	assert.equal(cronMatches("0 9 1 * 4", wed, NY), false);
+});
+
+test("cron checks can reuse wall-clock parts from the same instant", () => {
+	const at = new Date("2026-11-11T14:00:00Z");
+	const parts = zonedParts(at, NY);
+	assert.equal(parts.year, 2026);
+	assert.equal(parts.hour, 9);
+	assert.equal(parts.minute, 0);
+	assert.equal(parts.second, 0);
+	assert.equal(cronMatches("0 9 * * *", at, NY, parts), true);
+	assert.equal(cronMatches("0 9 * * *", at, NY, parts), cronMatches("0 9 * * *", at, NY));
 });
 
 test("cron rejects malformed expressions", () => {

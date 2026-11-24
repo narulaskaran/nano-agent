@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, statSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -174,30 +174,61 @@ export function startTimezoneSync(url: string | undefined, everyMs = 5 * 60_000)
 	setInterval(() => void refresh(), everyMs).unref();
 }
 
+interface TimezoneCache {
+	mtimeMs: number | null;
+	envTz: string;
+	zone: string;
+}
+
+/** Validated zone for one data dir, keyed by `settings.json`'s mtime. Unused while a timezone URL sync is active. */
+const timezoneCache = new Map<string, TimezoneCache>();
+
+const localStampFormatters = new Map<string, Intl.DateTimeFormat>();
+
+function localStampFormatter(timeZone: string): Intl.DateTimeFormat {
+	let formatter = localStampFormatters.get(timeZone);
+	if (!formatter) {
+		formatter = new Intl.DateTimeFormat("en-US", {
+			timeZone,
+			weekday: "short",
+			year: "numeric",
+			month: "short",
+			day: "numeric",
+			hour: "numeric",
+			minute: "2-digit",
+			timeZoneName: "short",
+		});
+		localStampFormatters.set(timeZone, formatter);
+	}
+	return formatter;
+}
+
 /** Timezone the owner is in: the synced source if any, then `settings.json` from onboarding, then TZ. */
 export function currentTimezone(config: Config): string {
 	if (syncedTimezone) return syncedTimezone;
+	const path = join(config.dataDir, "settings.json");
+	const envTz = process.env.TZ || "UTC";
+	let mtimeMs: number | null = null;
 	try {
-		const raw = readIfExists(join(config.dataDir, "settings.json"));
-		const tz = raw ? (JSON.parse(raw).timezone as unknown) : undefined;
-		if (validZone(tz)) return tz;
+		mtimeMs = statSync(path).mtimeMs;
 	} catch {
-		// fall through to the environment
+		mtimeMs = null;
 	}
-	return process.env.TZ || "UTC";
+	const cached = timezoneCache.get(config.dataDir);
+	if (cached && cached.mtimeMs === mtimeMs && cached.envTz === envTz) return cached.zone;
+	let zone = envTz;
+	if (mtimeMs !== null) {
+		try {
+			const tz = (JSON.parse(readFileSync(path, "utf8")) as { timezone?: unknown }).timezone;
+			if (validZone(tz)) zone = tz;
+		} catch {
+			// fall through to the environment
+		}
+	}
+	timezoneCache.set(config.dataDir, { mtimeMs, envTz, zone });
+	return zone;
 }
 
 export function localStamp(config: Config, at: Date = new Date()): string {
-	const tz = currentTimezone(config);
-	const text = new Intl.DateTimeFormat("en-US", {
-		timeZone: tz,
-		weekday: "short",
-		year: "numeric",
-		month: "short",
-		day: "numeric",
-		hour: "numeric",
-		minute: "2-digit",
-		timeZoneName: "short",
-	}).format(at);
-	return text;
+	return localStampFormatter(currentTimezone(config)).format(at);
 }

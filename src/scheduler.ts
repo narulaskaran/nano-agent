@@ -118,10 +118,12 @@ function fieldMatches(field: string, value: number, min: number, max: number): b
 	}).some(Boolean);
 }
 
-/** Wall-clock parts of `at` in `timeZone`. */
-export function zonedParts(at: Date, timeZone: string) {
-	const parts = Object.fromEntries(
-		new Intl.DateTimeFormat("en-US", {
+const zonedFormatters = new Map<string, Intl.DateTimeFormat>();
+
+function zonedFormatter(timeZone: string): Intl.DateTimeFormat {
+	let formatter = zonedFormatters.get(timeZone);
+	if (!formatter) {
+		formatter = new Intl.DateTimeFormat("en-US", {
 			timeZone,
 			hourCycle: "h23",
 			year: "numeric",
@@ -129,26 +131,37 @@ export function zonedParts(at: Date, timeZone: string) {
 			day: "numeric",
 			hour: "numeric",
 			minute: "numeric",
+			second: "numeric",
 			weekday: "short",
-		})
-			.formatToParts(at)
-			.map((p) => [p.type, p.value]),
-	);
+		});
+		zonedFormatters.set(timeZone, formatter);
+	}
+	return formatter;
+}
+
+/** Wall-clock parts of `at` in `timeZone`. */
+export function zonedParts(at: Date, timeZone: string) {
+	const parts = Object.fromEntries(zonedFormatter(timeZone).formatToParts(at).map((p) => [p.type, p.value]));
 	return {
-		minute: Number(parts.minute),
-		hour: Number(parts.hour),
-		day: Number(parts.day),
+		year: Number(parts.year),
 		month: Number(parts.month),
+		day: Number(parts.day),
+		hour: Number(parts.hour),
+		minute: Number(parts.minute),
+		second: Number(parts.second),
 		weekday: ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"].indexOf(parts.weekday as string),
 	};
 }
 
-/** Standard five-field cron: minute hour day-of-month month day-of-week (0 or 7 = Sunday). */
-export function cronMatches(expression: string, at: Date, timeZone: string): boolean {
+/**
+ * Standard five-field cron: minute hour day-of-month month day-of-week (0 or 7 = Sunday).
+ * Pass `parts` when the caller already resolved this instant in `timeZone` (the scheduler does, once per tick).
+ */
+export function cronMatches(expression: string, at: Date, timeZone: string, parts?: ReturnType<typeof zonedParts>): boolean {
 	const fields = expression.trim().split(/\s+/);
 	if (fields.length !== 5) throw new Error("cron needs five fields: minute hour day month weekday");
 	const [minute, hour, day, month, weekday] = fields as [string, string, string, string, string];
-	const now = zonedParts(at, timeZone);
+	const now = parts ?? zonedParts(at, timeZone);
 	const dayOk = fieldMatches(day, now.day, 1, 31);
 	const weekdayOk = fieldMatches(weekday, now.weekday, 0, 7) || (now.weekday === 0 && fieldMatches(weekday, 7, 0, 7));
 	// As in cron: when both day fields are restricted, either one matching is enough.
@@ -175,21 +188,8 @@ export function parseLocalTime(input: string, timeZone: string): number {
 	const wanted = Date.UTC(y, mo - 1, d, h, mi, s);
 	let guess = wanted;
 	for (let i = 0; i < 2; i++) {
-		const p = Object.fromEntries(
-			new Intl.DateTimeFormat("en-US", {
-				timeZone,
-				hourCycle: "h23",
-				year: "numeric",
-				month: "numeric",
-				day: "numeric",
-				hour: "numeric",
-				minute: "numeric",
-				second: "numeric",
-			})
-				.formatToParts(new Date(guess))
-				.map((part) => [part.type, Number(part.value)]),
-		) as Record<string, number>;
-		const shown = Date.UTC(p.year as number, (p.month as number) - 1, p.day, p.hour, p.minute, p.second);
+		const p = zonedParts(new Date(guess), timeZone);
+		const shown = Date.UTC(p.year, p.month - 1, p.day, p.hour, p.minute, p.second);
 		guess += wanted - shown;
 	}
 	return guess;
@@ -315,6 +315,12 @@ export class Scheduler {
 	async tick(now = new Date()): Promise<void> {
 		await this.drainOutbox().catch((error) => console.error("nano: outbox error:", error));
 		const tz = currentTimezone(this.config);
+		let parts: ReturnType<typeof zonedParts> | undefined;
+		try {
+			parts = zonedParts(now, tz);
+		} catch {
+			// A bad zone used to surface inside each cron check; leave parts unset so that still happens.
+		}
 		const minute = Math.floor(now.getTime() / 60_000);
 		for (const job of [...this.jobs]) {
 			if (this.running.has(job.id)) continue;
@@ -328,7 +334,7 @@ export class Scheduler {
 				}
 				const firedThisMinute = job.lastFired !== undefined && Math.floor(job.lastFired / 60_000) === minute;
 				try {
-					due = !firedThisMinute && cronMatches(job.cron, now, tz);
+					due = !firedThisMinute && cronMatches(job.cron, now, tz, parts);
 				} catch (error) {
 					due = false;
 					if (!this.badCron.has(job.id)) {
