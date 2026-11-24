@@ -65,6 +65,53 @@ export function htmlToText(html: string): string {
 		.trim();
 }
 
+/** Enough for the 20k-character page text after HTML is stripped. */
+export const WEB_FETCH_BYTE_CAP = 2 * 1024 * 1024;
+
+const BINARY_MEDIA = new Set(["application/octet-stream", "application/pdf"]);
+
+function mediaType(contentType: string): string {
+	return contentType.split(";", 1)[0]?.trim().toLowerCase() ?? "";
+}
+
+/** image, audio, video, PDF, and opaque bytes are not page text. */
+function isBinaryContent(contentType: string): boolean {
+	const mime = mediaType(contentType);
+	return mime.startsWith("image/") || mime.startsWith("audio/") || mime.startsWith("video/") || BINARY_MEDIA.has(mime);
+}
+
+/**
+ * Decode at most `cap` bytes. `TextDecoder` stays in streaming mode so a character
+ * split across chunks survives; the unread remainder is cancelled.
+ */
+export async function readCappedText(stream: ReadableStream<Uint8Array> | null, cap: number): Promise<{ text: string; bytes: number; cut: boolean }> {
+	if (!stream) return { text: "", bytes: 0, cut: false };
+	const reader = stream.getReader();
+	const decoder = new TextDecoder();
+	const parts: string[] = [];
+	let bytes = 0;
+	let cut = false;
+	try {
+		while (true) {
+			const { done, value } = await reader.read();
+			if (done) break;
+			const room = cap - bytes;
+			if (value.byteLength > room) {
+				if (room > 0) parts.push(decoder.decode(value.subarray(0, room), { stream: true }));
+				bytes += room;
+				cut = true;
+				break;
+			}
+			parts.push(decoder.decode(value, { stream: true }));
+			bytes += value.byteLength;
+		}
+		parts.push(decoder.decode());
+	} finally {
+		await reader.cancel().catch(() => {});
+	}
+	return { text: parts.join(""), bytes, cut };
+}
+
 function describeJob(job: Job, timeZone: string): string {
 	const when = job.at
 		? new Intl.DateTimeFormat("en-US", { timeZone, dateStyle: "medium", timeStyle: "short" }).format(job.at)
@@ -253,12 +300,17 @@ export function nanoTools(
 					redirect: "follow",
 					headers: { "user-agent": "Mozilla/5.0 (compatible; personal-assistant)", accept: "text/html,*/*" },
 				});
-				const body = await response.text();
 				const type = response.headers.get("content-type") ?? "";
-				const readable = type.includes("html") ? htmlToText(body) : body;
+				if (isBinaryContent(type)) {
+					await response.body?.cancel().catch(() => {});
+					throw new Error(`Refusing binary content (${mediaType(type)}).`);
+				}
+				const download = await readCappedText(response.body, WEB_FETCH_BYTE_CAP);
+				const readable = type.includes("html") ? htmlToText(download.text) : download.text;
 				const max = params.max_chars ?? 20_000;
-				const cut = readable.length > max ? `${readable.slice(0, max)}\n[cut at ${max} of ${readable.length} chars]` : readable;
-				return text(`HTTP ${response.status} ${type}\n\n${cut}`);
+				const limited = readable.length > max ? `${readable.slice(0, max)}\n[cut at ${max} of ${readable.length} chars]` : readable;
+				const body = download.cut ? [limited, `[cut at ${download.bytes} bytes]`].filter(Boolean).join("\n") : limited;
+				return text(`HTTP ${response.status} ${type}\n\n${body}`);
 			},
 		});
 
