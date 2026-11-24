@@ -8,14 +8,15 @@
 
 import { execFile, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { chmodSync, existsSync, mkdirSync, openSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, openSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import http from "node:http";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
-import { VAULT_RUN_DIR, VAULT_SOCKET } from "../../vault/lib/paths.mjs";
+import { socketCall, vaultControlled } from "../../vault/lib/client.mjs";
+import { VAULT_SOCKET } from "../../vault/lib/paths.mjs";
 
 const SELF = fileURLToPath(import.meta.url);
 const INSTALL = process.env.NANO_BROWSER_HOME || "/opt/nano-browser";
@@ -272,17 +273,6 @@ function cap(text, max = MAX_OUTPUT) {
 	return text.length > max ? `${text.slice(0, max)}\n[cut at ${max} of ${text.length} chars; use --max, a ref, or -i]` : text;
 }
 
-// The vault directory is created by root and owned by the vault user. A directory
-// the agent made for itself does not count: that would let it impersonate the vault.
-function vaultControlled() {
-	try {
-		const st = statSync(VAULT_RUN_DIR);
-		return st.isDirectory() && st.uid !== process.getuid();
-	} catch {
-		return false;
-	}
-}
-
 function activeSocket() {
 	return vaultControlled() ? VAULT_SOCKET : SOCKET;
 }
@@ -359,22 +349,9 @@ function safeDownloadName(name) {
 // Client
 
 function call(body, timeoutMs = 300_000) {
-	return new Promise((resolvePromise, reject) => {
-		const req = http.request({ socketPath: activeSocket(), path: "/", method: "POST", timeout: timeoutMs }, (res) => {
-			let data = "";
-			res.setEncoding("utf8");
-			res.on("data", (chunk) => (data += chunk));
-			res.on("end", () => {
-				try {
-					resolvePromise(JSON.parse(data));
-				} catch (error) {
-					reject(error);
-				}
-			});
-		});
-		req.on("timeout", () => req.destroy(new Error("browser daemon did not answer in time")));
-		req.on("error", reject);
-		req.end(JSON.stringify(body));
+	return socketCall(activeSocket(), body, {
+		timeoutMs,
+		messages: { timeout: "browser daemon did not answer in time" },
 	});
 }
 
@@ -431,6 +408,67 @@ async function client(argv) {
 	}
 	if (result.text) (result.ok ? process.stdout : process.stderr).write(`${result.text}\n`);
 	return result.ok ? 0 : 1;
+}
+
+// ---------------------------------------------------------------------------------------
+// WebMCP responses. The CDP event resolves the waiter for that invocation. The
+// slot is removed when the event is taken or the deadline passes, so the map
+// does not grow across calls. A late event for a finished invocation is dropped.
+
+const TOOL_RESPONSE = Symbol("toolResponse");
+const finishedInvocations = new WeakMap();
+
+function finishedIds(responses) {
+	let ids = finishedInvocations.get(responses);
+	if (!ids) {
+		ids = new Set();
+		finishedInvocations.set(responses, ids);
+	}
+	return ids;
+}
+
+/** Hand a `WebMCP.toolResponded` event to the invocation waiting on it. */
+export function deliverToolResponse(responses, event) {
+	const id = event.invocationId;
+	const slot = responses.get(id);
+	if (slot?.[TOOL_RESPONSE]) {
+		const resolve = slot[TOOL_RESPONSE];
+		responses.delete(id);
+		resolve(event);
+		return;
+	}
+	const finished = finishedIds(responses);
+	if (finished.has(id)) {
+		finished.delete(id);
+		return;
+	}
+	responses.set(id, event);
+}
+
+/** The tool response for `invocationId`, or undefined when `timeoutMs` passes. */
+export function awaitToolResponse(responses, invocationId, timeoutMs) {
+	const existing = responses.get(invocationId);
+	if (existing && !existing[TOOL_RESPONSE]) {
+		responses.delete(invocationId);
+		return Promise.resolve(existing);
+	}
+	finishedIds(responses).delete(invocationId);
+	return new Promise((resolve) => {
+		let timer;
+		const slot = {
+			[TOOL_RESPONSE](event) {
+				clearTimeout(timer);
+				resolve(event);
+			},
+		};
+		timer = setTimeout(() => {
+			if (responses.get(invocationId) !== slot) return;
+			responses.delete(invocationId);
+			finishedIds(responses).add(invocationId);
+			resolve(undefined);
+		}, timeoutMs);
+		responses.set(invocationId, slot);
+	});
 }
 
 // ---------------------------------------------------------------------------------------
@@ -700,7 +738,7 @@ export function createBrowserHost(options = {}) {
 			session.on("WebMCP.toolsRemoved", (e) => {
 				for (const t of e.tools) state.tools.delete(key(t));
 			});
-			session.on("WebMCP.toolResponded", (e) => state.responses.set(e.invocationId, e));
+			session.on("WebMCP.toolResponded", (event) => deliverToolResponse(state.responses, event));
 		};
 		await attach(p);
 		for (const frame of p.frames().slice(1)) {
@@ -1004,9 +1042,7 @@ export function createBrowserHost(options = {}) {
 			}
 			const params = { frameId: tool.frameId, input, ...(tool.toolId ? { toolId: tool.toolId } : { toolName: tool.name }) };
 			const { invocationId } = await tool.session.send("WebMCP.invokeTool", params);
-			const deadline = Date.now() + (Number(flags.timeout) * 1000 || 90_000);
-			while (!state.responses.has(invocationId) && Date.now() < deadline) await sleep(200);
-			const response = state.responses.get(invocationId);
+			const response = await awaitToolResponse(state.responses, invocationId, Number(flags.timeout) * 1000 || 90_000);
 			await settle(p, 3000);
 			if (!response) return `${name} was invoked${secret ? " with card data" : ""}; no response yet. Check the page with snapshot.`;
 			const detail = response.output !== undefined ? JSON.stringify(response.output) : (response.errorText ?? "");

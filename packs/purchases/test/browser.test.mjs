@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { test } from "node:test";
-import { cardFields, fillPlaceholders, hasPlaceholders, interactiveOnly, parseArgs, redact } from "../lib/browser.mjs";
+import { awaitToolResponse, cardFields, deliverToolResponse, fillPlaceholders, hasPlaceholders, interactiveOnly, parseArgs, redact } from "../lib/browser.mjs";
 
 // Stripe's public test card.
 const TEST_CARD = ["4242", "4242", "4242", "4242"].join("");
@@ -52,6 +53,39 @@ test("parseArgs separates flags from positionals", () => {
 		flags: { slow: true, "spend-request": "lsrq_1" },
 	});
 	assert.deepEqual(parseArgs(["-i", "--max", "500"]), { positional: [], flags: { interactive: true, max: "500" } });
+});
+
+test("WebMCP responses resolve from the event and leave the map empty", async () => {
+	const source = readFileSync(new URL("../lib/browser.mjs", import.meta.url), "utf8");
+	assert.match(source, /deliverToolResponse\(state\.responses, event\)/);
+	assert.match(source, /awaitToolResponse\(state\.responses, invocationId/);
+	assert.doesNotMatch(source, /state\.responses\.has\(/);
+	assert.doesNotMatch(source, /while \(!state\.responses/);
+
+	const responses = new Map();
+	deliverToolResponse(responses, { invocationId: "early", status: "success", output: { ok: true } });
+	assert.equal((await awaitToolResponse(responses, "early", 1000)).status, "success");
+	assert.equal(responses.size, 0);
+
+	const first = awaitToolResponse(responses, "one", 1000);
+	const second = awaitToolResponse(responses, "two", 1000);
+	deliverToolResponse(responses, { invocationId: "two", status: "success" });
+	assert.equal((await second).status, "success");
+	assert.equal(responses.size, 1);
+	deliverToolResponse(responses, { invocationId: "one", status: "success" });
+	assert.equal((await first).status, "success");
+	assert.equal(responses.size, 0);
+
+	for (let i = 0; i < 25; i++) {
+		const id = `call-${i}`;
+		const pending = awaitToolResponse(responses, id, 1000);
+		deliverToolResponse(responses, { invocationId: id, status: "success" });
+		assert.equal((await pending).status, "success");
+		const missed = await awaitToolResponse(responses, `timeout-${i}`, 0);
+		assert.equal(missed, undefined);
+		deliverToolResponse(responses, { invocationId: `timeout-${i}`, status: "late" });
+	}
+	assert.equal(responses.size, 0);
 });
 
 test("interactiveOnly keeps controls and headings", () => {
