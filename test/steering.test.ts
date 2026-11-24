@@ -337,6 +337,31 @@ test("a system turn skips tool-call progress text and still delivers its final r
 	await nano.conversation.dispose();
 });
 
+test("a system turn with tool calls and intermediate text sends only the final answer", async () => {
+	const nano = await scriptedConversation({ packs: "core" });
+	nano.script([
+		() => fauxAssistantMessage([fauxText("Checking the schedule first."), fauxToolCall("bash", { command: "true" })], { stopReason: "toolUse" }),
+		() => fauxAssistantMessage([fauxText("Comparing what came back."), fauxToolCall("bash", { command: "true" })], { stopReason: "toolUse" }),
+		() => fauxAssistantMessage(fauxText("Nothing on the calendar.")),
+	]);
+	await nano.conversation.inject("what is on the calendar");
+	assert.equal(await nano.next(), "Nothing on the calendar.");
+	await noMoreReplies(nano);
+	await nano.conversation.dispose();
+});
+
+test("a system turn whose final answer is [silent] sends nothing", async () => {
+	const nano = await scriptedConversation({ packs: "core" });
+	nano.script([
+		() => fauxAssistantMessage([fauxText("Checking the schedule first."), fauxToolCall("bash", { command: "true" })], { stopReason: "toolUse" }),
+		() => fauxAssistantMessage([fauxText("Still looking."), fauxToolCall("bash", { command: "true" })], { stopReason: "toolUse" }),
+		() => fauxAssistantMessage(fauxText("[silent]")),
+	]);
+	await nano.conversation.inject("silent scheduled task with several steps");
+	await noMoreReplies(nano);
+	await nano.conversation.dispose();
+});
+
 test("an owner turn still delivers progress text sent alongside a tool call", async () => {
 	const nano = await scriptedConversation({ packs: "core" });
 	nano.script([
