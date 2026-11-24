@@ -1,7 +1,7 @@
 FROM node:24-bookworm-slim
 
 RUN apt-get update \
- && apt-get install -y --no-install-recommends bash ca-certificates curl git jq python3 ripgrep sqlite3 tini util-linux \
+ && apt-get install -y --no-install-recommends bash ca-certificates curl git jq poppler-utils python3 ripgrep sqlite3 tini util-linux \
  && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
