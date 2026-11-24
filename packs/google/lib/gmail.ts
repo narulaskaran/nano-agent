@@ -243,20 +243,19 @@ async function read(ctx: Ctx, argv: string[]): Promise<void> {
 	ctx.auth.require("gmail.read");
 	const maxChars = intOpt(values["max-chars"], ids.length > 1 || values.thread ? 4000 : 8000, 200, 100_000);
 
-	for (const id of ids) {
-		let messages: Message[];
+	const batches = await mapLimit(ids, 8, async (id) => {
+		if (!values.thread) return { id, messages: [await ctx.api.get<Message>(`${GMAIL}/messages/${id}`, { format: "full" })], omitted: 0 };
+		const thread = await ctx.api.get<{ messages?: Message[] }>(`${GMAIL}/threads/${id}`, { format: "full" });
+		let messages = thread.messages ?? [];
 		let omitted = 0;
-		if (values.thread) {
-			const thread = await ctx.api.get<{ messages?: Message[] }>(`${GMAIL}/threads/${id}`, { format: "full" });
-			messages = thread.messages ?? [];
-			if (messages.length > THREAD_SHOWN) {
-				omitted = messages.length - THREAD_SHOWN;
-				messages = [messages[0] as Message, ...messages.slice(-(THREAD_SHOWN - 1))];
-			}
-		} else {
-			messages = [await ctx.api.get<Message>(`${GMAIL}/messages/${id}`, { format: "full" })];
+		if (messages.length > THREAD_SHOWN) {
+			omitted = messages.length - THREAD_SHOWN;
+			messages = [messages[0] as Message, ...messages.slice(-(THREAD_SHOWN - 1))];
 		}
-		const names = await labelNames(ctx, messages);
+		return { id, messages, omitted };
+	});
+	const names = await labelNames(ctx, batches.flatMap((batch) => batch.messages));
+	for (const { id, messages, omitted } of batches) {
 		const perMessage = values.thread ? Math.max(800, Math.floor((maxChars * 3) / Math.max(messages.length, 1))) : maxChars;
 		const described = messages.map((m, i) => {
 			let body = bodyText(m.payload);
@@ -601,35 +600,37 @@ async function unsubscribe(ctx: Ctx, argv: string[]): Promise<void> {
 		if (seen) seen.count++;
 		else bySender.set(key, { message: m, count: 1 });
 	}
-	const lines: string[] = [];
-	for (const { message: m, count } of bySender.values()) {
-		const from = oneLine(header(m.payload, "From"), 60);
-		const t = unsubscribeTargets(header(m.payload, "List-Unsubscribe"), header(m.payload, "List-Unsubscribe-Post"));
-		if (values["one-click"]) {
-			if (!t.oneClick || !t.web) {
-				lines.push(`${from}: one-click not offered.${t.web ? ` Web page: ${t.web}` : ""}${t.mailto ? ` Email: ${t.mailto}` : ""}${!t.web && !t.mailto ? " No unsubscribe header; look for a link in the body." : ""}`);
-				continue;
-			}
-			try {
-				const response = await ctx.io.fetch(t.web, {
-					method: "POST",
-					headers: { "content-type": "application/x-www-form-urlencoded" },
-					body: "List-Unsubscribe=One-Click",
-					redirect: "follow",
-					signal: AbortSignal.timeout(20_000),
-				});
-				lines.push(`${from}: ${response.ok ? "unsubscribed" : "unsubscribe request failed"} (one-click, HTTP ${response.status})`);
-			} catch (error) {
-				lines.push(`${from}: unsubscribe request failed (${(error as Error).message})`);
-			}
-			continue;
-		}
-		lines.push(`${m.id} | ${from} | ${oneLine(header(m.payload, "Subject"), 70)}${count > 1 ? ` | ${count} messages` : ""}`);
-		if (t.oneClick) lines.push(`  one-click: yes (google gmail unsubscribe ${m.id} --one-click)`);
-		if (t.web) lines.push(`  web: ${t.web}`);
-		if (t.mailto) lines.push(`  email: ${t.mailto} (sending it is an email: needs the owner's go-ahead)`);
-		if (!t.web && !t.mailto) lines.push("  no List-Unsubscribe header; look for an unsubscribe link in the body");
-	}
+	const senders = [...bySender.values()];
+	const lines = values["one-click"]
+		? await mapLimit(senders, 8, async ({ message: m }) => {
+				const from = oneLine(header(m.payload, "From"), 60);
+				const t = unsubscribeTargets(header(m.payload, "List-Unsubscribe"), header(m.payload, "List-Unsubscribe-Post"));
+				if (!t.oneClick || !t.web) {
+					return `${from}: one-click not offered.${t.web ? ` Web page: ${t.web}` : ""}${t.mailto ? ` Email: ${t.mailto}` : ""}${!t.web && !t.mailto ? " No unsubscribe header; look for a link in the body." : ""}`;
+				}
+				try {
+					const response = await ctx.io.fetch(t.web, {
+						method: "POST",
+						headers: { "content-type": "application/x-www-form-urlencoded" },
+						body: "List-Unsubscribe=One-Click",
+						redirect: "follow",
+						signal: AbortSignal.timeout(20_000),
+					});
+					return `${from}: ${response.ok ? "unsubscribed" : "unsubscribe request failed"} (one-click, HTTP ${response.status})`;
+				} catch (error) {
+					return `${from}: unsubscribe request failed (${(error as Error).message})`;
+				}
+			})
+		: senders.flatMap(({ message: m, count }) => {
+				const from = oneLine(header(m.payload, "From"), 60);
+				const t = unsubscribeTargets(header(m.payload, "List-Unsubscribe"), header(m.payload, "List-Unsubscribe-Post"));
+				const rows = [`${m.id} | ${from} | ${oneLine(header(m.payload, "Subject"), 70)}${count > 1 ? ` | ${count} messages` : ""}`];
+				if (t.oneClick) rows.push(`  one-click: yes (google gmail unsubscribe ${m.id} --one-click)`);
+				if (t.web) rows.push(`  web: ${t.web}`);
+				if (t.mailto) rows.push(`  email: ${t.mailto} (sending it is an email: needs the owner's go-ahead)`);
+				if (!t.web && !t.mailto) rows.push("  no List-Unsubscribe header; look for an unsubscribe link in the body");
+				return rows;
+			});
 	ctx.io.out(untrusted("EMAIL", lines.join("\n")));
 }
 

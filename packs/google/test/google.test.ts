@@ -21,7 +21,7 @@ interface Call {
 	body: string;
 	auth?: string;
 }
-type Reply = { status?: number; json?: unknown };
+type Reply = { status?: number; json?: unknown; wait?: Promise<unknown> };
 type Route = [method: string, url: string | RegExp, reply: (call: Call) => Reply];
 
 const b64 = (text: string) => Buffer.from(text).toString("base64url");
@@ -43,6 +43,7 @@ function harness(routes: Route[], env: Record<string, string> = {}) {
 			const route = routes.find(([m, u]) => m === call.method && (typeof u === "string" ? u === base : u.test(base)));
 			if (!route) throw new Error(`unexpected request ${call.method} ${base}`);
 			const reply = route[2](call);
+			if (reply.wait) await reply.wait;
 			return new Response(reply.json === undefined ? null : JSON.stringify(reply.json), { status: reply.status ?? 200 });
 		}) as typeof fetch,
 		out: (text) => out.push(text),
@@ -204,6 +205,51 @@ test("auth check --quiet is silent when healthy and prints one line (exit 0) whe
 	assert.equal((await h.run("auth", "check")).code, 1);
 });
 
+/** Hold `count` callers, then release them last-to-first so completions are not input order. */
+function reverseOverlap(count: number) {
+	let current = 0;
+	let max = 0;
+	let arrived = 0;
+	let released = false;
+	const pending: Array<(() => void) | undefined> = [];
+	const finished: number[] = [];
+	const finishOne = (index: number) => {
+		const resolve = pending[index];
+		if (!resolve) return;
+		pending[index] = undefined;
+		current--;
+		finished.push(index);
+		resolve();
+	};
+	const releaseReverse = async () => {
+		if (released) return;
+		released = true;
+		clearTimeout(timer);
+		for (let i = count - 1; i >= 0; i--) {
+			finishOne(i);
+			await new Promise((resolve) => setTimeout(resolve, 0));
+		}
+	};
+	const timer = setTimeout(() => {
+		released = true;
+		for (let i = 0; i < count; i++) finishOne(i);
+	}, 1000);
+	return {
+		max: () => max,
+		finished: () => finished,
+		enter(index: number): Promise<void> {
+			if (released) return Promise.resolve();
+			current++;
+			max = Math.max(max, current);
+			return new Promise((resolve) => {
+				pending[index] = resolve;
+				arrived++;
+				if (arrived >= count) void releaseReverse();
+			});
+		},
+	};
+}
+
 test("a 401 forces one refresh and a retry", async () => {
 	let first = true;
 	const h = harness([
@@ -224,6 +270,21 @@ test("a 401 forces one refresh and a retry", async () => {
 	const res = await h.run("gmail", "profile");
 	assert.equal(res.code, 0, res.err);
 	assert.equal(h.calls.at(-1)?.auth, "Bearer at-2");
+});
+
+test("concurrent requests with an expired token share one refresh", async () => {
+	const h = harness([
+		["POST", TOKEN_URI, () => ({ json: { access_token: "at-shared", expires_in: 3600 } })],
+		["POST", /\/threads\/[^/]+\/modify$/, () => ({ status: 204 })],
+	]);
+	connect(h.dir, FULL_SCOPES, new Date(NOW - 3_600_000).toISOString());
+	const ids = ["t1", "t2", "t3", "t4", "t5", "t6", "t7", "t8"];
+	const res = await h.run("gmail", "modify", ...ids, "--thread", "--archive");
+	assert.equal(res.code, 0, res.err);
+	assert.equal(h.calls.filter((c) => c.url.href === TOKEN_URI).length, 1);
+	const modifies = h.calls.filter((c) => c.method === "POST" && c.url.pathname.endsWith("/modify"));
+	assert.equal(modifies.length, ids.length);
+	assert.ok(modifies.every((c) => c.auth === "Bearer at-shared"));
 });
 
 test("missing scopes produce a clear message before any API call", async () => {
@@ -308,6 +369,48 @@ test("gmail read: HTML fallback, headers, attachments and unsubscribe hint insid
 	const parsed = JSON.parse(json.out);
 	assert.equal(parsed.subject, "Invoice 42");
 	assert.equal(parsed.attachments[0].filename, "invoice.pdf");
+});
+
+test("gmail read fetches several ids together, resolves labels once, and keeps order", async () => {
+	const ids = ["m1", "m2", "m3"];
+	const gate = reverseOverlap(ids.length);
+	const h = harness([
+		[
+			"GET",
+			/\/messages\/m\d$/,
+			(c) => {
+				const id = c.url.pathname.split("/").pop() as string;
+				return {
+					wait: gate.enter(ids.indexOf(id)),
+					json: {
+						id,
+						threadId: `t-${id}`,
+						labelIds: ["INBOX", "Label_1"],
+						internalDate: String(NOW),
+						payload: {
+							mimeType: "text/plain",
+							headers: [
+								{ name: "From", value: "Shop <orders@example.com>" },
+								{ name: "Subject", value: `Subject ${id}` },
+							],
+							body: { data: b64(`body ${id}`) },
+						},
+					},
+				};
+			},
+		],
+		["GET", `${GMAIL}/labels`, () => ({ json: { labels: [{ id: "Label_1", name: "Receipts" }] } })],
+	]);
+	connect(h.dir);
+	const res = await h.run("gmail", "read", ...ids, "--format", "json");
+	assert.equal(res.code, 0, res.err);
+	assert.equal(h.calls.filter((c) => c.url.pathname.endsWith("/labels")).length, 1);
+	assert.ok(gate.max() > 1);
+	assert.deepEqual(gate.finished(), [2, 1, 0]);
+	const parsed = res.out.split("\n").map((line) => JSON.parse(line) as { id: string; flags: string[]; subject: string });
+	assert.deepEqual(parsed.map((m) => m.id), ids);
+	assert.deepEqual(parsed.map((m) => m.subject), ids.map((id) => `Subject ${id}`));
+	assert.ok(parsed.every((m) => m.flags.includes("Receipts")));
 });
 
 test("gmail read takes ids from stdin and caps body length", async () => {
@@ -419,6 +522,54 @@ test("gmail unsubscribe lists targets per sender; --one-click posts RFC 8058", a
 	const post = h.calls.find((c) => c.url.hostname === "example.com");
 	assert.equal(post?.body, "List-Unsubscribe=One-Click");
 	assert.equal(post?.auth, undefined, "never send the Google token to a sender");
+});
+
+test("gmail unsubscribe --one-click posts concurrently and keeps sender order", async () => {
+	const people = [
+		{ id: "m1", from: "Alice <a@example.com>", url: "https://example.com/unsub/1" },
+		{ id: "m2", from: "Bob <b@example.com>", url: "https://example.com/unsub/2" },
+		{ id: "m3", from: "Cara <c@example.com>", url: "https://example.com/unsub/3" },
+	];
+	const gate = reverseOverlap(people.length);
+	const h = harness([
+		[
+			"GET",
+			/\/messages\/m\d$/,
+			(c) => {
+				const id = c.url.pathname.split("/").pop();
+				const person = people.find((p) => p.id === id);
+				return {
+					json: {
+						id,
+						threadId: "t",
+						payload: {
+							headers: [
+								{ name: "From", value: person?.from },
+								{ name: "Subject", value: "Sale" },
+								{ name: "List-Unsubscribe", value: `<${person?.url}>` },
+								{ name: "List-Unsubscribe-Post", value: "List-Unsubscribe=One-Click" },
+							],
+						},
+					},
+				};
+			},
+		],
+		[
+			"POST",
+			/^https:\/\/example\.com\/unsub\/\d$/,
+			(c) => ({ status: 200, wait: gate.enter(Number(c.url.pathname.split("/").pop()) - 1) }),
+		],
+	]);
+	connect(h.dir);
+	const done = await h.run("gmail", "unsubscribe", ...people.map((p) => p.id), "--one-click");
+	assert.equal(done.code, 0, done.err);
+	assert.ok(gate.max() > 1);
+	assert.deepEqual(gate.finished(), [2, 1, 0]);
+	const names = ["Alice", "Bob", "Cara"].map((name) => done.out.indexOf(name));
+	assert.ok(names[0] !== undefined && names[1] !== undefined && names[2] !== undefined);
+	assert.ok(names[0] >= 0 && names[0] < names[1] && names[1] < names[2]);
+	assert.equal(h.calls.filter((c) => c.method === "POST" && c.url.hostname === "example.com").length, people.length);
+	assert.ok(h.calls.filter((c) => c.url.hostname === "example.com").every((c) => c.auth === undefined));
 });
 
 test("helpers: quoted text, unsubscribe parsing, MIME with attachments", () => {
