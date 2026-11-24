@@ -374,3 +374,19 @@ test("an owner turn still delivers progress text sent alongside a tool call", as
 	await noMoreReplies(nano);
 	await nano.conversation.dispose();
 });
+
+test("an owner turn does not send text attached to a delegate tool call", async () => {
+	const nano = await scriptedConversation({ packs: "core" });
+	nano.script([
+		() =>
+			fauxAssistantMessage(
+				[fauxText("On it, looking into that now."), fauxToolCall("delegate", { title: "Research flights", instructions: "Compare flights to Lisbon." })],
+				{ stopReason: "toolUse" },
+			),
+		() => fauxAssistantMessage(fauxText("On it — I'll check flights and report back.")),
+	]);
+	nano.say("compare flights to Lisbon");
+	assert.equal(await nano.next(), "On it — I'll check flights and report back.");
+	await noMoreReplies(nano);
+	await nano.conversation.dispose();
+});
