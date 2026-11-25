@@ -5,6 +5,7 @@ import type { ExtensionFactory } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import type { Channel } from "./channel.ts";
 import type { Config } from "./config.ts";
+import type { Decider } from "./decide.ts";
 import type { Scheduler } from "./scheduler.ts";
 
 /**
@@ -12,6 +13,7 @@ import type { Scheduler } from "./scheduler.ts";
  *
  *   <pack>/skills/<skill>/SKILL.md   Agent Skills, advertised to the model
  *   <pack>/extension.ts              optional: default export (ctx) => ExtensionFactory | ExtensionFactory[]
+ *   <pack>/service.ts                optional: one background service for the Nano process
  *   <pack>/bin/                      optional: commands put on PATH for the agent's shell
  *   <pack>/install.sh                optional: run as root when the image is built (repo packs only)
  *   <pack>/start-root.sh             optional: run as root at container start, before privileges drop (repo packs only)
@@ -37,6 +39,31 @@ export interface PackContext {
 }
 
 type PackExtension = (ctx: PackContext) => ExtensionFactory | ExtensionFactory[];
+
+export interface PackServiceContext {
+	config: Config;
+	decider: Decider;
+	signal: AbortSignal;
+	notifyOwner: (text: string) => Promise<void>;
+	/**
+	 * One plain completion on the main model with the given system prompt: no tools, no owner profile or memory,
+	 * no conversation. For text written to third parties, which must not carry the owner's context.
+	 */
+	compose: (system: string, user: string, signal: AbortSignal) => Promise<string>;
+}
+
+export async function startPackServices(ctx: PackServiceContext): Promise<void> {
+	await Promise.all(packDirs(ctx.config).map(async (dir) => {
+		const file = join(dir, "service.ts");
+		if (!existsSync(file)) return;
+		try {
+			const service = (await import(pathToFileURL(file).href)).default;
+			if (!ctx.signal.aborted) await service(ctx);
+		} catch (error) {
+			if (!ctx.signal.aborted) console.error(`nano: pack service ${file} stopped:`, (error as Error)?.message ?? error);
+		}
+	}));
+}
 
 /** Missing packs already reported. One line per pack per process, not per message. */
 const missingPackLogged = new Set<string>();

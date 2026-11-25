@@ -3,8 +3,9 @@ import { Conversation, StateStore } from "./agent.ts";
 import { createDecider, decisionTransport } from "./decide.ts";
 import { type Channel, createPhotonChannel, createStdinChannel } from "./channel.ts";
 import { currentTimezone, loadConfig, startTimezoneSync } from "./config.ts";
-import { createModelRuntime, localProviderId } from "./models.ts";
-import { extendPath, skillPaths } from "./packs.ts";
+import { completeText, createModelRuntime, getMainModel, localProviderId } from "./models.ts";
+import { refreshProviderSettings } from "./provider-settings.ts";
+import { extendPath, skillPaths, startPackServices } from "./packs.ts";
 import { profileExists } from "./prompt.ts";
 import { providerFetch } from "./provider-client.ts";
 import { Scheduler } from "./scheduler.ts";
@@ -88,10 +89,12 @@ async function main(): Promise<void> {
 	}
 
 	let stopping = false;
+	const packServices = new AbortController();
 	const shutdown = async (signal: string) => {
 		if (stopping) return;
 		stopping = true;
 		console.error(`nano: ${signal}, shutting down`);
+		packServices.abort();
 		scheduler.stop();
 		tasks.stop();
 		await Promise.allSettled([...conversations.values()].map((c) => c.dispose()));
@@ -104,6 +107,20 @@ async function main(): Promise<void> {
 	startTimezoneSync(process.env.NANO_TZ_URL);
 	scheduler.start();
 	void tasks.reportLost();
+	void startPackServices({
+		config,
+		decider,
+		signal: packServices.signal,
+		notifyOwner: (text) => conversation(config.owner).deliver(text),
+		compose: async (system, user, signal) => {
+			await refreshProviderSettings(config, modelRuntime);
+			const composer = getMainModel(config, modelRuntime);
+			if (!composer) throw new Error("The main model is unavailable");
+			const reply = await completeText(modelRuntime, composer, system, [user], { maxTokens: 600, signal });
+			if (reply.error) throw new Error(reply.error);
+			return reply.text;
+		},
+	});
 	console.error(`nano: listening on ${config.channel}, ${scheduler.list().length} scheduled job(s), up to ${config.maxTasks} background task(s)`);
 	await channel.start((message) => conversation(message.spaceId).receive(message));
 	await shutdown("channel closed");

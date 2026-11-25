@@ -86,6 +86,7 @@ A pack adds one capability. List the ones you want in `NANO_PACKS` (for example 
 |---|---|
 | `core` | Scheduling patterns for reminders, monitors and heartbeats. |
 | `google` | Gmail and Google Calendar, connected over chat. [Setup](packs/google/README.md) |
+| `apple-messages` | Streams, searches and reads the owner's synced Messages from a Mac, with on-demand attachments. [Setup](packs/apple-messages/README.md) |
 | `mcp` | Any MCP server listed in `data/pi/mcp.json`. [Setup](packs/mcp/README.md) |
 | `purchases` | A headless browser and Stripe Link for buying things; Link's own app approval is the gate. [Setup](packs/purchases/README.md) |
 | `vault` | Credentials the agent can use but not read, entered through a page on your tailnet. Needs `purchases`. [Setup](packs/vault/README.md) |

@@ -1,0 +1,37 @@
+# Apple Messages
+
+Nano reads the Messages library on a signed-in Mac or macOS guest. An SSH session streams live message events. Other SSH sessions handle search, history, individual reads, and attachment downloads. The Mac runs the bridge in `mac/bridge.mjs` with `imsg` and Node 24. Nano stays on its Linux host.
+
+## Guest setup
+
+1. Sign in to Messages and enable Messages in iCloud. Verify a new direct or group iMessage arrives in the guest. Enable Text Message Forwarding on the iPhone if you also want SMS, MMS, and RCS. Verify each service in Messages before relying on it.
+2. Install Node 24 and [`imsg` 0.21.1](https://github.com/openclaw/imsg/releases/tag/v0.21.1) or later. Copy `mac/bridge.mjs` to a fixed path in the signed-in user's home. Enable Remote Login for that user and enable **Allow full disk access for remote users** in Remote Login settings. Verify access by running `nano-messages chats` after configuring SSH. [imsg permissions](https://imsg.sh/permissions.html)
+3. Create a dedicated SSH key for Nano. Put its public key in the guest user's `~/.ssh/authorized_keys` with `restrict,command="/absolute/path/to/node /absolute/path/to/bridge.mjs /absolute/path/to/imsg"` before the key. Write real absolute paths. The key invokes a fixed protocol, so it cannot request an arbitrary shell command or mark messages read. It can read messages and request a send through the guest agent. Nano enforces the reply policy, so give this key only to Nano and leave other guest SSH keys separate.
+4. Make the guest SSH port reachable from Nano over a private network and verify the guest's host key. In Nano's Linux container, keep the SSH config, private key, and known-hosts file outside the repo and readable by Nano's UID. Use a config like this with paths as seen **inside the container**:
+
+   ```sshconfig
+   Host nano-messages
+     HostName <guest-or-forward-address>
+     Port <guest-or-forward-port>
+     User <signed-in-macos-user>
+     IdentityFile /data/apple-messages/ssh/id_ed25519
+     UserKnownHostsFile /data/apple-messages/ssh/known_hosts
+     IdentitiesOnly yes
+   ```
+
+5. Add `apple-messages` to `NANO_PACKS`, set `NANO_APPLE_MESSAGES_SSH_CONFIG`, and rebuild and restart Nano. This enables on-demand reads. Set `NANO_APPLE_MESSAGES_WATCH=on` to enable automatic decisions for direct mentions across all synced chats. The chat denylist starts empty. Run `nano-messages deny CHAT_ID` to exclude specific chats before enabling the watcher.
+
+## What is processed
+
+- The live feed observes new messages of any service the Mac syncs. It starts at the Mac's current database tail on the first run. Earlier messages remain searchable. Subsequent connections resume from a cursor, with new messages and decision candidates committed together. `nano-messages status` shows the last cursor, number of inbound messages observed and number of pending decisions or notifications. A replaced Messages database requires reviewing the guest and resetting the local inbox database while Nano is stopped.
+- Incoming messages from the last 15 minutes reach the configured decision model only if the chat has a GUID and is outside the denylist, the body contains the standalone word `nano` (case-insensitive), and a local OTP heuristic passes. The heuristic conservatively excludes strings that look like verification codes. Audio-bearing messages are available for manual retrieval and excluded from automatic decisions because a voice transcript can appear in the body field.
+- A confident notification decision sends a fixed notice through Nano's existing channel to the owner. Inbound text is treated as data and never fed into an agent turn automatically. The packet sent to the decision model contains only up to 4,000 characters of body text and a boolean indicating whether media is present. Pending decisions and notifications retry independently of the stream. A crash just after a successful Photon send can repeat the owner notice.
+- `nano-messages search "text"`, `history CHAT_ID`, and `read MESSAGE_ID` query the guest directly. `nano-messages attachment MESSAGE_ID INDEX` saves the original bytes to Nano's workspace, up to 250 MiB per file. Images, videos, voice notes, and other files must already be downloaded by Messages on the guest. Retrieve these on demand to keep binary data out of automatic decisions. `nano-messages help` lists the commands.
+- **Replies (opt-in).** With `NANO_APPLE_MESSAGES_REPLY=on`, a direct mention in an eligible chat can get a reply there. Nano drafts a reply in a tool-free model call and asks the decision model to check it for credentials and private information. The draft needs approval at 0.90 confidence or higher. Nano sends a fixed refusal in the chat when there is no approved draft. Nano adds 🤖, attempts delivery once per message, and tells the owner if delivery fails.
+- **Sending on the Mac.** The bridge forwards Nano's send request to `mac/send-agent.mjs` in the signed-in GUI session. Install it next to `bridge.mjs` and load a LaunchAgent with `LimitLoadToSessionType` = `Aqua`, `RunAtLoad`, `KeepAlive` and `ProgramArguments` = the guest's `node` and `send-agent.mjs`. Approve Automation once on the guest by running `printf '{"op":"ping"}\n' | nc -U ~/.local/share/nano-messages/send.sock` and clicking Allow on the console. The ping sends nothing.
+- **Managing excluded chats.** The owner can ask Nano to run `nano-messages deny CHAT_ID`, `undeny CHAT_ID`, or `denied`. Changes take effect without restarting. Denying a chat skips future decisions and any reply or notification that has yet to begin delivery. A delivery already in progress can still finish. The owner can still read the chat on demand.
+- Coverage is limited to new message rows that Messages syncs and `imsg` exposes. This stream tracks new messages rather than reactions, edits, and unsends. Reads show the current version of an available message.
+
+## First live test
+
+Enable the watcher and leave replies off initially. Send a direct iMessage and a group iMessage to the owner from another account, verify they appear in the guest, and check that `nano-messages status` shows the inbound count advance. Search for a unique phrase and read that message by ID. Send an image and a voice note and fetch their originals. Send a plain message, a fake OTP mentioning Nano, and a genuine request mentioning Nano. Only the genuine request should reach the decision model. Deny the test chat and verify that another direct mention produces no automatic decision. Send a message while the bridge is offline and confirm it arrives once after reconnecting. Test SMS and RCS separately if available.
