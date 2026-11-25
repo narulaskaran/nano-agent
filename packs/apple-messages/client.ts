@@ -13,7 +13,7 @@ export interface Message {
 	is_from_me: boolean;
 	created_at?: string;
 	text?: string;
-	attachments: unknown[];
+	attachments: ({ mime_type?: string } | null)[];
 }
 
 export function connect(request: { op: string; [key: string]: unknown }, signal: AbortSignal): ChildProcessWithoutNullStreams {
@@ -42,8 +42,8 @@ export function completion(child: ChildProcessWithoutNullStreams): Promise<Error
 }
 
 /** Delivers one approved reply through the guest. Never retry a failure with an unknown outcome. */
-export async function sendReply(chat: { id: number; guid: string }, text: string, signal: AbortSignal): Promise<void> {
-	const child = connect({ op: "send", chat_id: chat.id, chat_guid: chat.guid, text }, signal);
+export async function sendReply(chatGuid: string, text: string, signal: AbortSignal): Promise<void> {
+	const child = connect({ op: "send", chat_guid: chatGuid, text }, signal);
 	const done = completion(child);
 	child.stdout.resume();
 	const error = await done;

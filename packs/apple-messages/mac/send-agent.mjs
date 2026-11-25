@@ -23,10 +23,9 @@ function explain(stderr) {
 	return "Messages refused the send";
 }
 
-/** An Apple event to Messages that sends nothing. It raises the Automation prompt once, so no real chat is needed to approve it. */
-function ping() {
+function osa(args, timeout) {
 	return new Promise((resolve, reject) => {
-		execFile(osascript, ["-e", 'with timeout of 60 seconds\ntell application "Messages" to get name\nend timeout'], { timeout: 70_000, killSignal: "SIGKILL" }, (error, _stdout, stderr) => {
+		execFile(osascript, args, { timeout, killSignal: "SIGKILL" }, (error, _stdout, stderr) => {
 			if (error) reject(new Error(explain(String(stderr))));
 			else resolve();
 		});
@@ -34,14 +33,10 @@ function ping() {
 }
 
 function sendOne(request) {
-	if (request?.op === "ping") return ping();
+	// A ping is an Apple event to Messages that sends nothing. It raises the Automation prompt once, so no real chat is needed to approve it.
+	if (request?.op === "ping") return osa(["-e", 'with timeout of 60 seconds\ntell application "Messages" to get name\nend timeout'], 70_000);
 	if (typeof request?.chat_guid !== "string" || typeof request.text !== "string") throw new Error("Invalid reply");
-	return new Promise((resolve, reject) => {
-		execFile(osascript, ["-e", script, "--", request.text, request.chat_guid], { timeout: 30_000, killSignal: "SIGKILL" }, (error, _stdout, stderr) => {
-			if (error) reject(new Error(explain(String(stderr))));
-			else resolve();
-		});
-	});
+	return osa(["-e", script, "--", request.text, request.chat_guid], 30_000);
 }
 
 mkdirSync(stateDir, { recursive: true, mode: 0o700 });

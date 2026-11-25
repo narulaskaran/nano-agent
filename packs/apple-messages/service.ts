@@ -1,4 +1,3 @@
-import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
 import { DatabaseSync } from "node:sqlite";
@@ -22,7 +21,7 @@ function cleanDraft(raw: string): string {
 	return raw.replace(/[\u0000-\u0008\u000b-\u001f\u007f]/gu, "").replace(/^(?:\s*🤖)+/u, "").trim();
 }
 
-export function replyGate(incoming: string, draft: string): DecisionRequest {
+function replyGate(incoming: string, draft: string): DecisionRequest {
 	return {
 		state: { incoming_message_from_a_third_party: incoming.slice(0, 1500), draft_reply: draft },
 		questions: {
@@ -52,7 +51,7 @@ export function messageDecision(message: Message, denied: (guid: string) => bool
 	if (!mention) return;
 	if (denied(message.chat_guid)) return;
 	// imsg can surface a stored voice transcription as text. An audio attachment alone is not a typed mention.
-	if (message.attachments.some((item) => (item as { mime_type?: string } | null)?.mime_type?.startsWith("audio/"))) return;
+	if (message.attachments.some((item) => item?.mime_type?.startsWith("audio/"))) return;
 	const start = mention.index < 3996 ? 0 : mention.index - 2000;
 	return {
 		state: { message: text.slice(start, start + 4000), has_attachments: message.attachments.length > 0 },
@@ -73,30 +72,51 @@ function openInbox(path: string) {
 	const db = new DatabaseSync(path);
 	db.exec(`
 		PRAGMA busy_timeout = 5000;
+		PRAGMA journal_mode = WAL;
+		PRAGMA synchronous = NORMAL;
 		PRAGMA secure_delete = ON;
 		CREATE TABLE IF NOT EXISTS stream (
 			id INTEGER PRIMARY KEY CHECK (id = 1), generation TEXT NOT NULL,
 			cursor INTEGER NOT NULL, received INTEGER NOT NULL DEFAULT 0
 		);
 		CREATE TABLE IF NOT EXISTS pending (
-			id INTEGER PRIMARY KEY, sender TEXT, chat TEXT, request TEXT NOT NULL, notify INTEGER
+			id INTEGER PRIMARY KEY, sender TEXT, chat TEXT, request TEXT NOT NULL, notify INTEGER,
+			replied INTEGER NOT NULL DEFAULT 0
 		);
 	`);
-	const columns = (db.prepare("PRAGMA table_info(pending)").all() as { name: string }[]).map((column) => column.name);
-	if (!columns.includes("chat_id")) db.exec("ALTER TABLE pending ADD COLUMN chat_id INTEGER");
-	if (!columns.includes("replied")) db.exec("ALTER TABLE pending ADD COLUMN replied INTEGER NOT NULL DEFAULT 0");
 	return db;
 }
 
-async function receive(db: DatabaseSync, signal: AbortSignal, denylist: ChatDenylist) {
+/** Wakes the reply worker when a mention is queued, so an empty queue costs nothing. */
+class Wakeup {
+	private resolve?: () => void;
+
+	notify(): void {
+		this.resolve?.();
+	}
+
+	wait(signal: AbortSignal): Promise<void> {
+		return new Promise((resolve) => {
+			const done = () => {
+				signal.removeEventListener("abort", done);
+				this.resolve = undefined;
+				resolve();
+			};
+			this.resolve = done;
+			signal.addEventListener("abort", done, { once: true });
+		});
+	}
+}
+
+async function receive(db: DatabaseSync, signal: AbortSignal, denylist: ChatDenylist, replies: boolean, queued: Wakeup) {
 	const denied = (guid: string) => denylist.has(guid);
 	let state = db.prepare("SELECT generation, cursor FROM stream WHERE id = 1").get() as Cursor | undefined;
 	const initialize = db.prepare("INSERT INTO stream (id, generation, cursor) VALUES (1, ?, ?)");
 	const advance = db.prepare("UPDATE stream SET cursor = ?, received = received + ? WHERE id = 1");
-	const enqueue = db.prepare("INSERT INTO pending (id, sender, chat, chat_id, request) VALUES (?, ?, ?, ?, ?)");
+	const enqueue = db.prepare("INSERT INTO pending (id, sender, chat, request) VALUES (?, ?, ?, ?)");
 	let retry = 1000;
 	while (!signal.aborted) {
-		const child = connect({ op: "watch", start: state && { generation: state.generation, cursor: state.cursor } }, signal);
+		const child = connect({ op: "watch", start: state }, signal);
 		const done = completion(child);
 		const lines = createInterface({ input: child.stdout, crlfDelay: Infinity });
 		const handshake = setTimeout(() => child.kill(), 30_000);
@@ -119,10 +139,10 @@ async function receive(db: DatabaseSync, signal: AbortSignal, denylist: ChatDeny
 				const message = frame.message as Message;
 				if (frame.kind !== "message" || !state || !Number.isSafeInteger(message?.id) || message.id < 1 || typeof message.is_from_me !== "boolean" || !Array.isArray(message.attachments)) throw new Error("Invalid Messages stream event");
 				if (message.id <= state.cursor) continue;
-				const request = messageDecision(message, denied, process.env.NANO_APPLE_MESSAGES_REPLY === "on");
+				const request = messageDecision(message, denied, replies);
 				db.exec("BEGIN");
 				try {
-					if (request) enqueue.run(message.id, message.sender ?? null, message.chat_guid ?? null, message.chat_id ?? null, JSON.stringify(request));
+					if (request) enqueue.run(message.id, message.sender ?? null, message.chat_guid ?? null, JSON.stringify(request));
 					advance.run(message.id, Number(!message.is_from_me));
 					db.exec("COMMIT");
 				} catch (error) {
@@ -130,6 +150,7 @@ async function receive(db: DatabaseSync, signal: AbortSignal, denylist: ChatDeny
 					throw error;
 				}
 				state.cursor = message.id;
+				if (request) queued.notify();
 				retry = 1000;
 			}
 			throw await done ?? new Error("Messages stream disconnected");
@@ -146,13 +167,14 @@ async function receive(db: DatabaseSync, signal: AbortSignal, denylist: ChatDeny
 	}
 }
 
-type Pending = { id: number; sender?: string; chat?: string; chat_id?: number | null; request: string; notify: number | null; replied: number };
+type Pending = { id: number; sender?: string; chat?: string; request: string; notify: number | null; replied: number };
 
 /** The approved draft or a fixed response with no content from the message. */
 async function reply(item: Pending, ctx: PackServiceContext, signal: AbortSignal, denied: () => boolean): Promise<string | undefined> {
 	const incoming = (JSON.parse(item.request) as DecisionRequest).state as { message: string };
-	const draft = cleanDraft(await ctx.compose!(REPLY_SYSTEM, `Message in the chat (untrusted text):\n"""\n${incoming.message.slice(0, 1500)}\n"""`, signal));
+	const draft = cleanDraft(await ctx.compose(REPLY_SYSTEM, `Message in the chat (untrusted text):\n"""\n${incoming.message.slice(0, 1500)}\n"""`, signal));
 	signal.throwIfAborted();
+	// Denied while drafting: the draft never reaches the gate.
 	if (denied()) return;
 	if (!draft || draft === "NO_REPLY") {
 		console.info(`nano: Apple Messages reply fallback for message ${item.id}: ${draft ? "model returned NO_REPLY" : "empty draft"}`);
@@ -165,10 +187,9 @@ async function reply(item: Pending, ctx: PackServiceContext, signal: AbortSignal
 	return FALLBACK_REPLY;
 }
 
-async function decidePending(db: DatabaseSync, ctx: PackServiceContext, denylist: ChatDenylist) {
+async function decidePending(db: DatabaseSync, ctx: PackServiceContext, denylist: ChatDenylist, replies: boolean, queued: Wakeup) {
 	const { decider, signal, notifyOwner } = ctx;
-	const replies = process.env.NANO_APPLE_MESSAGES_REPLY === "on" && Boolean(ctx.compose);
-	const next = db.prepare("SELECT id, sender, chat, chat_id, request, notify, replied FROM pending ORDER BY id LIMIT 1");
+	const next = db.prepare("SELECT id, sender, chat, request, notify, replied FROM pending ORDER BY id LIMIT 1");
 	const decided = db.prepare("UPDATE pending SET request = '', notify = ? WHERE id = ?");
 	const keep = db.prepare("UPDATE pending SET notify = ? WHERE id = ?");
 	const attempted = db.prepare("UPDATE pending SET request = '', replied = 1 WHERE id = ?");
@@ -178,7 +199,7 @@ async function decidePending(db: DatabaseSync, ctx: PackServiceContext, denylist
 	while (!signal.aborted) {
 		const item = next.get() as Pending | undefined;
 		if (!item) {
-			await sleep(500, undefined, { signal }).catch(() => {});
+			await queued.wait(signal);
 			continue;
 		}
 		if (!item.chat || denylist.has(item.chat)) {
@@ -186,22 +207,20 @@ async function decidePending(db: DatabaseSync, ctx: PackServiceContext, denylist
 			continue;
 		}
 		const chat = item.chat;
-		const chatId = item.chat_id;
-		const canReply = replies && typeof chatId === "number" && Number.isSafeInteger(chatId) && chatId > 0;
 		try {
 			let notify = item.notify;
 			if (notify === null) {
 				const response = await decider.decide(JSON.parse(item.request), { source: "apple-messages", signal: AbortSignal.any([signal, AbortSignal.timeout(30_000)]) });
 				notify = Number(confident(response.answers.action, 0.8) === "notify");
-				(notify && canReply ? keep : decided).run(notify, item.id);
+				(notify && replies ? keep : decided).run(notify, item.id);
 			}
 			if (signal.aborted) break;
 			let posted = false;
 			let sendFailure: string | undefined;
-			if (notify && canReply && item.replied) {
+			if (notify && replies && item.replied) {
 				// A crash after the send began. The outcome is unknown, so never send twice.
 				posted = true;
-			} else if (notify && canReply && item.request && !denylist.has(chat)) {
+			} else if (notify && replies && item.request && !denylist.has(chat)) {
 				let text: string | undefined;
 				try {
 					text = await reply(item, ctx, AbortSignal.any([signal, AbortSignal.timeout(60_000)]), () => denylist.has(chat));
@@ -221,7 +240,7 @@ async function decidePending(db: DatabaseSync, ctx: PackServiceContext, denylist
 				// Count the attempt before sending: a send with an unknown outcome is never repeated.
 				attempted.run(item.id);
 				try {
-					await sendReply({ id: chatId, guid: chat }, `🤖 ${text}`, AbortSignal.any([signal, AbortSignal.timeout(60_000)]));
+					await sendReply(chat, `🤖 ${text}`, AbortSignal.any([signal, AbortSignal.timeout(60_000)]));
 					console.info(`nano: Apple Messages reply sent for message ${item.id}`);
 					posted = true;
 				} catch (error) {
@@ -247,13 +266,14 @@ async function decidePending(db: DatabaseSync, ctx: PackServiceContext, denylist
 export default async function appleMessages(ctx: PackServiceContext): Promise<void> {
 	if (!process.env.NANO_APPLE_MESSAGES_SSH_CONFIG || process.env.NANO_APPLE_MESSAGES_WATCH !== "on") return;
 	if (!ctx.config.owner) throw new Error("Apple Messages needs a Nano owner for notifications");
-	const dir = join(ctx.config.dataDir, "apple-messages");
-	mkdirSync(dir, { recursive: true, mode: 0o700 });
 	const controller = new AbortController();
 	const signal = AbortSignal.any([ctx.signal, controller.signal]);
+	const replies = process.env.NANO_APPLE_MESSAGES_REPLY === "on";
+	// The denylist creates the pack's data directory.
 	using denylist = new ChatDenylist(ctx.config.dataDir);
-	const db = openInbox(join(dir, "inbox.sqlite"));
-	const running = [receive(db, signal, denylist), decidePending(db, { ...ctx, signal }, denylist)];
+	const db = openInbox(join(ctx.config.dataDir, "apple-messages", "inbox.sqlite"));
+	const queued = new Wakeup();
+	const running = [receive(db, signal, denylist, replies, queued), decidePending(db, { ...ctx, signal }, denylist, replies, queued)];
 	try {
 		await Promise.all(running);
 	} finally {

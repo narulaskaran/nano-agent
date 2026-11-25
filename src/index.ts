@@ -3,7 +3,7 @@ import { Conversation, StateStore } from "./agent.ts";
 import { createDecider, decisionTransport } from "./decide.ts";
 import { type Channel, createPhotonChannel, createStdinChannel } from "./channel.ts";
 import { currentTimezone, loadConfig, startTimezoneSync } from "./config.ts";
-import { createModelRuntime, getMainModel, localProviderId } from "./models.ts";
+import { completeText, createModelRuntime, getMainModel, localProviderId } from "./models.ts";
 import { refreshProviderSettings } from "./provider-settings.ts";
 import { extendPath, skillPaths, startPackServices } from "./packs.ts";
 import { profileExists } from "./prompt.ts";
@@ -116,13 +116,9 @@ async function main(): Promise<void> {
 			await refreshProviderSettings(config, modelRuntime);
 			const composer = getMainModel(config, modelRuntime);
 			if (!composer) throw new Error("The main model is unavailable");
-			const reply = await modelRuntime.completeSimple(
-				composer,
-				{ systemPrompt: system, messages: [{ role: "user", content: user, timestamp: Date.now() }] },
-				{ maxTokens: 600, signal },
-			);
-			if (reply.stopReason === "error") throw new Error(reply.errorMessage ?? "model error");
-			return reply.content.flatMap((part) => (part.type === "text" ? [part.text] : [])).join("").trim();
+			const reply = await completeText(modelRuntime, composer, system, [user], { maxTokens: 600, signal });
+			if (reply.error) throw new Error(reply.error);
+			return reply.text;
 		},
 	});
 	console.error(`nano: listening on ${config.channel}, ${scheduler.list().length} scheduled job(s), up to ${config.maxTasks} background task(s)`);

@@ -7,12 +7,13 @@ import { join } from "node:path";
 import { connect, createServer } from "node:net";
 import { createInterface } from "node:readline";
 import { DatabaseSync } from "node:sqlite";
-import { test } from "node:test";
+import { type TestContext, test } from "node:test";
 import { setTimeout as sleep } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { loadConfig } from "../../../src/config.ts";
 import type { Decider, DecisionRequest } from "../../../src/decide.ts";
+import type { PackServiceContext } from "../../../src/packs.ts";
 import { ChatDenylist } from "../denylist.ts";
 import appleMessages, { messageDecision } from "../service.ts";
 
@@ -21,6 +22,30 @@ type DecisionResponse = Awaited<ReturnType<Decider["decide"]>>;
 const cli = fileURLToPath(new URL("../cli.ts", import.meta.url));
 const bridge = fileURLToPath(new URL("../mac/bridge.mjs", import.meta.url));
 const exec = promisify(execFile);
+
+/** Sets environment variables for one test and restores them afterwards. */
+function withEnv(t: TestContext, vars: Record<string, string>): void {
+	const previous = Object.fromEntries(Object.keys(vars).map((key) => [key, process.env[key]]));
+	Object.assign(process.env, vars);
+	t.after(() => {
+		for (const [key, value] of Object.entries(previous)) {
+			if (value === undefined) delete process.env[key];
+			else process.env[key] = value;
+		}
+	});
+}
+
+/** Runs the watch service against a test data directory. Drafting fails unless the test supplies compose. */
+function startService(dir: string, signal: AbortSignal, ctx: Pick<PackServiceContext, "decider" | "notifyOwner"> & Partial<Pick<PackServiceContext, "compose">>): Promise<void> {
+	return appleMessages({
+		config: loadConfig({ NANO_CHANNEL: "stdin", NANO_DATA_DIR: dir, NANO_OWNER: "owner" }),
+		signal,
+		compose: async () => {
+			throw new Error("drafting is off in this test");
+		},
+		...ctx,
+	});
+}
 
 test("Messages watcher filters locally, checkpoints while the model is down and resumes", async (t) => {
 	const dir = await mkdtemp(join(tmpdir(), "nano-messages-watch-"));
@@ -31,14 +56,7 @@ test("Messages watcher filters locally, checkpoints while the model is down and 
 		NANO_APPLE_MESSAGES_WATCH: "on",
 		NANO_APPLE_MESSAGES_REPLY: "off",
 	};
-	const previous = Object.fromEntries(Object.keys(setup).map((key) => [key, process.env[key]]));
-	Object.assign(process.env, setup);
-	t.after(() => {
-		for (const [key, value] of Object.entries(previous)) {
-			if (value === undefined) delete process.env[key];
-			else process.env[key] = value;
-		}
-	});
+	withEnv(t, setup);
 	await writeFile(join(dir, "ssh"), `#!/usr/bin/env node
 const { createInterface } = require("node:readline");
 createInterface({ input: process.stdin }).once("line", (line) => {
@@ -68,9 +86,7 @@ createInterface({ input: process.stdin }).once("line", (line) => {
 	const calls: DecisionRequest[] = [];
 	const notices: string[] = [];
 	const abort = new AbortController();
-	const service = appleMessages({
-		config: loadConfig({ NANO_CHANNEL: "stdin", NANO_DATA_DIR: dir, NANO_OWNER: "owner" }),
-		signal: abort.signal,
+	const service = startService(dir, abort.signal, {
 		decider: {
 			allow() {},
 			async decide(request) {
@@ -189,14 +205,7 @@ test("replies are drafted without tools, checked by the decision model, and post
 		NANO_APPLE_MESSAGES_REPLY: "on",
 		NANO_TEST_SENT: join(dir, "sent.jsonl"),
 	};
-	const previous = Object.fromEntries(Object.keys(setup).map((key) => [key, process.env[key]]));
-	Object.assign(process.env, setup);
-	t.after(() => {
-		for (const [key, value] of Object.entries(previous)) {
-			if (value === undefined) delete process.env[key];
-			else process.env[key] = value;
-		}
-	});
+	withEnv(t, setup);
 	await writeFile(join(dir, "ssh"), `#!/usr/bin/env node
 const { appendFileSync } = require("node:fs");
 const { createInterface } = require("node:readline");
@@ -236,9 +245,7 @@ createInterface({ input: process.stdin }).once("line", (line) => {
 	const verdicts: unknown[] = [];
 	const notices: string[] = [];
 	const abort = new AbortController();
-	const service = appleMessages({
-		config: loadConfig({ NANO_CHANNEL: "stdin", NANO_DATA_DIR: dir, NANO_OWNER: "owner" }),
-		signal: abort.signal,
+	const service = startService(dir, abort.signal, {
 		decider: {
 			allow() {},
 			async decide(request): Promise<DecisionResponse> {
@@ -277,7 +284,7 @@ createInterface({ input: process.stdin }).once("line", (line) => {
 			"🤖 I can answer general questions here.",
 			"🤖 I can’t answer that here.",
 		]);
-		assert.ok(sent.every((request) => request.op === "send" && request.chat_id === 7 && request.chat_guid === "iMessage;+;chat123"));
+		assert.ok(sent.every((request) => request.op === "send" && request.chat_guid === "iMessage;+;chat123"));
 	} finally {
 		abort.abort();
 		await service;
@@ -294,14 +301,7 @@ test("an unsure decision produces the fixed fallback", async (t) => {
 		NANO_APPLE_MESSAGES_REPLY: "on",
 		NANO_TEST_SENT: join(dir, "sent.jsonl"),
 	};
-	const previous = Object.fromEntries(Object.keys(setup).map((key) => [key, process.env[key]]));
-	Object.assign(process.env, setup);
-	t.after(() => {
-		for (const [key, value] of Object.entries(previous)) {
-			if (value === undefined) delete process.env[key];
-			else process.env[key] = value;
-		}
-	});
+	withEnv(t, setup);
 	await writeFile(join(dir, "ssh"), `#!/usr/bin/env node
 const { appendFileSync } = require("node:fs");
 const { createInterface } = require("node:readline");
@@ -316,9 +316,7 @@ createInterface({ input: process.stdin }).once("line", (line) => {
 `, { mode: 0o700 });
 	const notices: string[] = [];
 	const abort = new AbortController();
-	const service = appleMessages({
-		config: loadConfig({ NANO_CHANNEL: "stdin", NANO_DATA_DIR: dir, NANO_OWNER: "owner" }),
-		signal: abort.signal,
+	const service = startService(dir, abort.signal, {
 		decider: {
 			allow() {},
 			async decide(request): Promise<DecisionResponse> {

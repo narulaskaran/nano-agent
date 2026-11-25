@@ -40,6 +40,23 @@ export function getMainModel(config: Config, runtime: ModelRuntime): Model<Api> 
 	return model && capOutput(withProviderOrder(config, model));
 }
 
+/** One plain completion: a system prompt and user turns, with no tools or session. */
+export async function completeText(
+	runtime: ModelRuntime,
+	model: Model<Api>,
+	systemPrompt: string | undefined,
+	userTurns: string[],
+	options: { maxTokens: number; signal?: AbortSignal },
+): Promise<{ text: string; error?: string }> {
+	const reply = await runtime.completeSimple(
+		model,
+		{ systemPrompt, messages: userTurns.map((content) => ({ role: "user" as const, content, timestamp: Date.now() })) },
+		options,
+	);
+	const text = reply.content.flatMap((part) => (part.type === "text" ? [part.text] : [])).join("").trim();
+	return { text, error: reply.stopReason === "error" ? (reply.errorMessage ?? "model error") : undefined };
+}
+
 export async function createModelRuntime(config: Config): Promise<ModelRuntime> {
 	const runtime = await ModelRuntime.create({
 		authPath: join(config.dataDir, "pi", "auth.json"),

@@ -5,7 +5,7 @@ import { Type } from "typebox";
 import type { Channel } from "./channel.ts";
 import { type Config, currentTimezone } from "./config.ts";
 import { ask, askLocal, type ChatFn } from "./local.ts";
-import { chooseModel, getMainModel } from "./models.ts";
+import { chooseModel, completeText, getMainModel } from "./models.ts";
 import { DEFAULT_PDF_DPI, DEFAULT_PDF_PAGES, MAX_PDF_DPI, MAX_PDF_PAGES, MIN_PDF_DPI, viewPdf } from "./pdf.ts";
 import { cronMatches, type Job, parseLocalTime, type Scheduler } from "./scheduler.ts";
 import { workspaceDir } from "./session.ts";
@@ -38,14 +38,9 @@ function mainChat(config: Config, modelRuntime: ModelRuntime): ChatFn {
 		const model = getMainModel(config, modelRuntime);
 		if (!model) return { status: 404, text: "main model not found" };
 		const [system, ...rest] = messages;
-		const reply = await modelRuntime.completeSimple(
-			model,
-			{ systemPrompt: system?.content, messages: rest.map((m) => ({ role: "user" as const, content: m.content, timestamp: Date.now() })) },
-			{ maxTokens: 2048, signal },
-		);
-		if (reply.stopReason === "error") return { status: 500, text: reply.errorMessage ?? "model error" };
-		const said = reply.content.flatMap((p) => (p.type === "text" ? [p.text] : [])).join("").trim();
-		return { status: 200, text: said };
+		const reply = await completeText(modelRuntime, model, system?.content, rest.map((m) => m.content), { maxTokens: 2048, signal });
+		if (reply.error) return { status: 500, text: reply.error };
+		return { status: 200, text: reply.text };
 	};
 }
 

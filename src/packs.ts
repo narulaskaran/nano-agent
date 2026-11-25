@@ -49,7 +49,7 @@ export interface PackServiceContext {
 	 * One plain completion on the main model with the given system prompt: no tools, no owner profile or memory,
 	 * no conversation. For text written to third parties, which must not carry the owner's context.
 	 */
-	compose?: (system: string, user: string, signal: AbortSignal) => Promise<string>;
+	compose: (system: string, user: string, signal: AbortSignal) => Promise<string>;
 }
 
 export async function startPackServices(ctx: PackServiceContext): Promise<void> {
