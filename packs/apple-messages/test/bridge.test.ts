@@ -15,7 +15,7 @@ import { loadConfig } from "../../../src/config.ts";
 import type { Decider, DecisionRequest } from "../../../src/decide.ts";
 import type { PackServiceContext } from "../../../src/packs.ts";
 import { ChatDenylist } from "../denylist.ts";
-import appleMessages, { messageDecision } from "../service.ts";
+import appleMessages, { excludedChats, messageDecision } from "../service.ts";
 
 type DecisionResponse = Awaited<ReturnType<Decider["decide"]>>;
 
@@ -303,8 +303,8 @@ test("a mention in any chat that is not denied gets the same gated reply, and th
 		NANO_APPLE_MESSAGES_WATCH: "on",
 		NANO_APPLE_MESSAGES_REPLY: "on",
 		NANO_TEST_SENT: join(dir, "sent.jsonl"),
-		// The retired per-chat allowlist setting must have no effect: none of the chats below is this one.
-		NANO_APPLE_MESSAGES_CHATS: "iMessage;+;retired-allowlist-chat",
+		// No chat allowlist: every chat not denied is watched.
+		NANO_APPLE_MESSAGES_CHATS: "",
 	};
 	withEnv(t, setup);
 	await writeFile(join(dir, "ssh"), `#!/usr/bin/env node
@@ -469,18 +469,19 @@ createInterface({ input: process.stdin }).once("line", (line) => {
 		assert.match(sent[0].text, /Codex/);
 		assert.doesNotMatch(sent[0].text, /what are the options/i);
 		const context = [
-			"+15550123: I blasted through my $200 free cursor plan this month",
+			"Someone: I blasted through my $200 free cursor plan this month",
 			"Sam: Both grok model usage and 3rd party",
 			"Sam: Not sure what to do now",
 			"Sam: Do I try Claude for a month",
 			"Sam: Or codex",
 		].join("\n");
-		// The owner's turn is kept and labelled, an unnamed sender shows as their handle; robot replies, codes, later messages and stale ones are not.
+		// The owner's turn is kept and labelled, an unnamed sender shows as Someone, never their handle; robot replies, codes, later messages and stale ones are not.
 		const expected = ["Owner: Sure, go ahead", context].join("\n");
 		assert.equal(prompts.length, 1);
 		assert.ok(prompts[0].user.includes(expected), prompts[0].user);
 		assert.ok(prompts[0].user.indexOf(expected) < prompts[0].user.indexOf("Nano which one should I try"));
 		assert.doesNotMatch(prompts[0].user.split("Message that mentioned Nano")[0], /robot reply|482913|later message|long ago|which one should I try/);
+		assert.doesNotMatch(prompts[0].user, /15550123/);
 		assert.match(prompts[0].system, /only tools are web_search and web_fetch/);
 		assert.match(prompts[0].system, /Never ask what the options are when they were named in the chat/);
 		// The approval check gets exactly the same context.
@@ -613,6 +614,18 @@ case "$*" in *denied*) echo "execution error: Not authorized to send Apple event
 	// A ping asks Messages for its name and sends nothing.
 	assert.deepEqual(await ask({ op: "ping" }), { status: "sent" });
 	assert.match(await readFile(calls, "utf8"), /get name/);
+});
+
+test("a chat allowlist, when set, excludes every other chat, and the denylist still applies", () => {
+	const denied = { has: (guid: string) => guid === "iMessage;+;both" };
+	const chats = excludedChats(denied, " iMessage;-;+15550100 , iMessage;+;GROUP,iMessage;+;both");
+	assert.equal(chats.has("iMessage;-;+15550100"), false);
+	assert.equal(chats.has("iMessage;+;group"), false);
+	assert.equal(chats.has("iMessage;+;both"), true);
+	assert.equal(chats.has("iMessage;+;other"), true);
+	const open = excludedChats(denied, "");
+	assert.equal(open.has("iMessage;+;other"), false);
+	assert.equal(open.has("iMessage;+;both"), true);
 });
 
 test("the owner's own mentions count only with replies on, never Nano's own replies, and stale messages are ignored", () => {
