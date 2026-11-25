@@ -217,6 +217,8 @@ createInterface({ input: process.stdin }).once("line", (line) => {
     return;
   }
   if (request.op === "send") return appendFileSync(process.env.NANO_TEST_SENT, line + "\\n");
+  if (request.op === "chat") return console.log(JSON.stringify({ chat: { id: 7 } }));
+  if (request.op === "history") return console.log(JSON.stringify({ messages: JSON.parse(process.env.NANO_TEST_HISTORY || "[]") }));
   console.log(JSON.stringify({ kind: "ready", generation: "guest-1", cursor: request.start?.cursor ?? 0 }));
   if (request.start) return;
   const emit = (id, text, is_from_me = false, chat_guid = "iMessage;+;chat123") => console.log(JSON.stringify({ kind: "message", message: {
@@ -292,6 +294,205 @@ createInterface({ input: process.stdin }).once("line", (line) => {
 	}
 });
 
+test("a mention in any chat that is not denied gets the same gated reply, and the denylist still excludes", async (t) => {
+	const dir = await mkdtemp(join(tmpdir(), "nano-messages-all-chats-"));
+	t.after(() => rm(dir, { recursive: true, force: true }));
+	const setup = {
+		PATH: `${dir}:${process.env.PATH}`,
+		NANO_APPLE_MESSAGES_SSH_CONFIG: join(dir, "unused"),
+		NANO_APPLE_MESSAGES_WATCH: "on",
+		NANO_APPLE_MESSAGES_REPLY: "on",
+		NANO_TEST_SENT: join(dir, "sent.jsonl"),
+		// The retired per-chat allowlist setting must have no effect: none of the chats below is this one.
+		NANO_APPLE_MESSAGES_CHATS: "iMessage;+;retired-allowlist-chat",
+	};
+	withEnv(t, setup);
+	await writeFile(join(dir, "ssh"), `#!/usr/bin/env node
+const { appendFileSync } = require("node:fs");
+const { createInterface } = require("node:readline");
+createInterface({ input: process.stdin }).once("line", (line) => {
+  const request = JSON.parse(line);
+  if (request.op === "send") return appendFileSync(process.env.NANO_TEST_SENT, line + "\\n");
+  if (request.op === "chat") return console.log(JSON.stringify({ chat: { id: 7 } }));
+  if (request.op === "history") return console.log(JSON.stringify({ messages: JSON.parse(process.env.NANO_TEST_HISTORY || "[]") }));
+  console.log(JSON.stringify({ kind: "ready", generation: "guest-1", cursor: request.start?.cursor ?? 0 }));
+  if (request.start) return;
+  const emit = (id, chat_id, chat_guid) => console.log(JSON.stringify({ kind: "message", message: {
+    id, chat_id, chat_guid, sender: "friend@example.com", is_from_me: false, attachments: [], text: "Nano, what is up?",
+  }}));
+  emit(1, 6, "iMessage;+;group-chat");
+  emit(2, 24, "iMessage;-;+15550100");
+  emit(3, 175, "iMessage;-;+15550101");
+  emit(4, 90, "iMessage;+;another-group");
+  emit(5, 91, "iMessage;-;friend@example.com");
+  emit(6, 92, "iMessage;+;denied-group");
+  emit(7, 93, "iMessage;-;+15550199");
+  process.stdin.unref();
+});
+`, { mode: 0o700 });
+	using denylist = new ChatDenylist(dir);
+	denylist.set("iMessage;+;denied-group", true);
+	denylist.set("iMessage;-;+15550199", true);
+	const gated: unknown[] = [];
+	const decided: string[] = [];
+	const toolNames: string[][] = [];
+	const abort = new AbortController();
+	const service = appleMessages({
+		// The Brave key is set, so both tools are offered: web_search and web_fetch are the whole allowlist.
+		config: loadConfig({ NANO_CHANNEL: "stdin", NANO_DATA_DIR: dir, NANO_OWNER: "owner", BRAVE_SEARCH_API_KEY: "test-key" }),
+		signal: abort.signal,
+		decider: {
+			allow() {},
+			async decide(request, options): Promise<DecisionResponse> {
+				decided.push(String(options?.source));
+				if (request.questions.verdict) {
+					gated.push(request.state);
+					return { model: "test-model", answers: { verdict: { type: "choice", choice: "send", confidence: 0.97 } } };
+				}
+				return { model: "test-model", answers: { action: { type: "choice", choice: "notify", confidence: 0.98 } } };
+			},
+		},
+		compose: async (_system, _user, _signal, options) => {
+			toolNames.push((options?.tools ?? []).map((tool) => tool.name));
+			return "All good here.";
+		},
+		notifyOwner: async () => {},
+	});
+	try {
+		const deadline = Date.now() + 8000;
+		const sentPath = setup.NANO_TEST_SENT;
+		const count = async () => existsSync(sentPath) ? (await readFile(sentPath, "utf8")).trim().split("\n").filter(Boolean).length : 0;
+		while (await count() < 5 && Date.now() < deadline) await sleep(25);
+		await sleep(300);
+		const sent = (await readFile(sentPath, "utf8")).trim().split("\n").map((line) => JSON.parse(line));
+		assert.deepEqual(sent.map((request) => request.chat_guid), [
+			"iMessage;+;group-chat",
+			"iMessage;-;+15550100",
+			"iMessage;-;+15550101",
+			"iMessage;+;another-group",
+			"iMessage;-;friend@example.com",
+		]);
+		assert.ok(sent.every((request) => request.op === "send" && request.text === "🤖 All good here."));
+		// Every sent draft passed the approval gate, and no draft ever had more than the two web tools.
+		assert.equal(gated.length, 5);
+		assert.equal(decided.filter((source) => source === "apple-messages-reply").length, 5);
+		assert.deepEqual(toolNames, Array.from({ length: 5 }, () => ["web_search", "web_fetch"]));
+		// The denied chats got nothing: no decision, no draft, no send.
+		assert.equal(decided.filter((source) => source === "apple-messages").length, 5);
+	} finally {
+		abort.abort();
+		await service;
+	}
+});
+
+test("the draft and the approval check both see the chat just before the mention, and the draft answers from it", async (t) => {
+	const dir = await mkdtemp(join(tmpdir(), "nano-messages-context-"));
+	t.after(() => rm(dir, { recursive: true, force: true }));
+	const mentionId = 200;
+	const at = (minutesBefore: number) => new Date(Date.now() - 60_000 - minutesBefore * 60_000).toISOString();
+	const line = (id: number, text: string, minutesBefore: number, extra: Record<string, unknown> = {}) =>
+		({ id, chat_id: 7, chat_guid: "iMessage;+;chat123", sender: "+15550123", sender_name: "Sam", is_from_me: false, attachments: [], created_at: at(minutesBefore), text, ...extra });
+	// Newest first, the way a history read may return it.
+	const history = [
+		line(203, "Nano, a later message that must not appear", -1),
+		line(mentionId, "Nano which one should I try", 0),
+		line(199, "Or codex", 1),
+		line(198, "Do I try Claude for a month", 1),
+		line(197, "Not sure what to do now", 2),
+		line(196, "Both grok model usage and 3rd party", 2),
+		line(195, "🤖 An earlier robot reply", 3),
+		line(194, "Your verification code is 482913", 3),
+		line(193, "I blasted through my $200 free cursor plan this month", 3, { sender_name: undefined, sender: "+15550123" }),
+		line(192, "Sure, go ahead", 4, { is_from_me: true }),
+		line(100, "A message from long ago", 120),
+	];
+	const setup = {
+		PATH: `${dir}:${process.env.PATH}`,
+		NANO_APPLE_MESSAGES_SSH_CONFIG: join(dir, "unused"),
+		NANO_APPLE_MESSAGES_WATCH: "on",
+		NANO_APPLE_MESSAGES_REPLY: "on",
+		NANO_TEST_SENT: join(dir, "sent.jsonl"),
+		NANO_TEST_HISTORY: JSON.stringify(history),
+		NANO_TEST_MENTION: JSON.stringify(history.find((message) => message.id === mentionId)),
+	};
+	withEnv(t, setup);
+	await writeFile(join(dir, "ssh"), `#!/usr/bin/env node
+const { appendFileSync } = require("node:fs");
+const { createInterface } = require("node:readline");
+createInterface({ input: process.stdin }).once("line", (line) => {
+  const request = JSON.parse(line);
+  if (request.op === "send") return appendFileSync(process.env.NANO_TEST_SENT, line + "\\n");
+  if (request.op === "chat") return console.log(JSON.stringify({ chat: { id: 7 } }));
+  if (request.op === "history") {
+    if (request.id !== 7) { console.error("wrong chat"); process.exitCode = 1; return; }
+    return console.log(JSON.stringify({ messages: JSON.parse(process.env.NANO_TEST_HISTORY) }));
+  }
+  console.log(JSON.stringify({ kind: "ready", generation: "guest-1", cursor: request.start?.cursor ?? 0 }));
+  if (request.start) return;
+  console.log(JSON.stringify({ kind: "message", message: JSON.parse(process.env.NANO_TEST_MENTION) }));
+  process.stdin.unref();
+});
+`, { mode: 0o700 });
+	const prompts: { system: string; user: string }[] = [];
+	const gated: Record<string, string>[] = [];
+	const abort = new AbortController();
+	const service = startService(dir, abort.signal, {
+		decider: {
+			allow() {},
+			async decide(request): Promise<DecisionResponse> {
+				if (request.questions.verdict) {
+					gated.push(request.state as Record<string, string>);
+					return { model: "test-model", answers: { verdict: { type: "choice", choice: "send", confidence: 0.97 } } };
+				}
+				return { model: "test-model", answers: { action: { type: "choice", choice: "notify", confidence: 0.98 } } };
+			},
+		},
+		// Stands in for the model: it answers specifically only when the prompt carries the options and the situation.
+		compose: async (system, user) => {
+			prompts.push({ system, user });
+			const known = /Claude/.test(user) && /codex/i.test(user) && /\$200 free cursor plan/.test(user);
+			return known
+				? "Since you've used up the $200 Cursor plan, I'd try Claude first, then Codex if it falls short."
+				: "Happy to help you choose! What are the options?";
+		},
+		notifyOwner: async () => {},
+	});
+	try {
+		const deadline = Date.now() + 8000;
+		while (!existsSync(setup.NANO_TEST_SENT) && Date.now() < deadline) await sleep(25);
+		await sleep(200);
+		const sent = (await readFile(setup.NANO_TEST_SENT, "utf8")).trim().split("\n").map((entry) => JSON.parse(entry));
+		assert.equal(sent.length, 1);
+		assert.match(sent[0].text, /^🤖 /);
+		assert.match(sent[0].text, /\$200 Cursor plan/);
+		assert.match(sent[0].text, /Claude/);
+		assert.match(sent[0].text, /Codex/);
+		assert.doesNotMatch(sent[0].text, /what are the options/i);
+		const context = [
+			"+15550123: I blasted through my $200 free cursor plan this month",
+			"Sam: Both grok model usage and 3rd party",
+			"Sam: Not sure what to do now",
+			"Sam: Do I try Claude for a month",
+			"Sam: Or codex",
+		].join("\n");
+		// The owner's turn is kept and labelled, an unnamed sender shows as their handle; robot replies, codes, later messages and stale ones are not.
+		const expected = ["Owner: Sure, go ahead", context].join("\n");
+		assert.equal(prompts.length, 1);
+		assert.ok(prompts[0].user.includes(expected), prompts[0].user);
+		assert.ok(prompts[0].user.indexOf(expected) < prompts[0].user.indexOf("Nano which one should I try"));
+		assert.doesNotMatch(prompts[0].user.split("Message that mentioned Nano")[0], /robot reply|482913|later message|long ago|which one should I try/);
+		assert.match(prompts[0].system, /only tools are web_search and web_fetch/);
+		assert.match(prompts[0].system, /Never ask what the options are when they were named in the chat/);
+		// The approval check gets exactly the same context.
+		assert.equal(gated.length, 1);
+		assert.equal(gated[0].recent_chat_context, expected);
+		assert.equal(gated[0].incoming_message_from_a_third_party, "Nano which one should I try");
+	} finally {
+		abort.abort();
+		await service;
+	}
+});
+
 test("an unsure decision produces the fixed fallback", async (t) => {
 	const dir = await mkdtemp(join(tmpdir(), "nano-messages-unsure-"));
 	t.after(() => rm(dir, { recursive: true, force: true }));
@@ -309,6 +510,8 @@ const { createInterface } = require("node:readline");
 createInterface({ input: process.stdin }).once("line", (line) => {
   const request = JSON.parse(line);
   if (request.op === "send") return appendFileSync(process.env.NANO_TEST_SENT, line + "\\n");
+  if (request.op === "chat") return console.log(JSON.stringify({ chat: { id: 7 } }));
+  if (request.op === "history") return console.log(JSON.stringify({ messages: JSON.parse(process.env.NANO_TEST_HISTORY || "[]") }));
   console.log(JSON.stringify({ kind: "ready", generation: "guest-1", cursor: request.start?.cursor ?? 0 }));
   if (request.start) return;
   console.log(JSON.stringify({ kind: "message", message: { id: 1, chat_id: 7, chat_guid: "iMessage;+;chat123", sender: "a@example.com", is_from_me: false, attachments: [], text: "Nano, hello" } }));

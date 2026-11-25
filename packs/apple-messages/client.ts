@@ -10,6 +10,7 @@ export interface Message {
 	chat_guid?: string;
 	chat_id: number;
 	sender?: string;
+	sender_name?: string;
 	is_from_me: boolean;
 	created_at?: string;
 	text?: string;
@@ -39,6 +40,18 @@ export function completion(child: ChildProcessWithoutNullStreams): Promise<Error
 		child.once("error", resolve);
 		child.once("close", (status) => resolve(status === 0 ? undefined : new Error(Buffer.concat(diagnostics).toString().trim() || `SSH bridge exited (${status})`)));
 	});
+}
+
+/** One read-only request to the guest bridge that answers with a single JSON document. */
+export async function ask(request: { op: string; [key: string]: unknown }, signal: AbortSignal): Promise<unknown> {
+	const child = connect(request, signal);
+	const done = completion(child);
+	let output = "";
+	child.stdout.setEncoding("utf8");
+	for await (const chunk of child.stdout) output += chunk;
+	const error = await done;
+	if (error) throw error;
+	return JSON.parse(output);
 }
 
 /** Delivers one approved reply through the guest. Never retry a failure with an unknown outcome. */

@@ -156,6 +156,8 @@ const { createInterface } = require("node:readline");
 createInterface({ input: process.stdin }).once("line", (line) => {
   const request = JSON.parse(line);
   if (request.op === "send") return appendFileSync(process.env.NANO_TEST_SENT, line + "\\n");
+  if (request.op === "chat") return console.log(JSON.stringify({ chat: { id: 7 } }));
+  if (request.op === "history") return console.log(JSON.stringify({ messages: JSON.parse(process.env.NANO_TEST_HISTORY || "[]") }));
   console.log(JSON.stringify({ kind: "ready", generation: "guest-1", cursor: request.start?.cursor ?? 0 }));
   if (request.start) return;
   JSON.parse(process.env.NANO_TEST_TEXTS).forEach((text, i) => console.log(JSON.stringify({ kind: "message", message: {
