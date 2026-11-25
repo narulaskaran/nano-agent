@@ -46,7 +46,7 @@ export async function completeText(
 	model: Model<Api>,
 	systemPrompt: string | undefined,
 	userTurns: string[],
-	options: { maxTokens: number; signal?: AbortSignal },
+	options: { maxTokens?: number; signal?: AbortSignal },
 ): Promise<{ text: string; error?: string }> {
 	const reply = await runtime.completeSimple(
 		model,

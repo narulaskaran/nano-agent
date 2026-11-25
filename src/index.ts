@@ -116,7 +116,7 @@ async function main(): Promise<void> {
 			await refreshProviderSettings(config, modelRuntime);
 			const composer = getMainModel(config, modelRuntime);
 			if (!composer) throw new Error("The main model is unavailable");
-			const reply = await completeText(modelRuntime, composer, system, [user], { maxTokens: 600, signal });
+			const reply = await completeText(modelRuntime, composer, system, [user], { signal });
 			if (reply.error) throw new Error(reply.error);
 			return reply.text;
 		},
