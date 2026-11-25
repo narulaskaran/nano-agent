@@ -1,6 +1,6 @@
-import { chmodSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { type ParseArgsOptionsConfig, parseArgs } from "node:util";
 
 /** Everything the CLI touches outside itself, so tests can run it with no network or real files. */
@@ -58,15 +58,6 @@ export function dataDir(env: Io["env"]): string {
 	return env.NANO_DATA_DIR || join(homedir(), ".nano");
 }
 
-/** Write a file only its owner can read, atomically. */
-export function writePrivate(path: string, contents: string | Buffer): void {
-	mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
-	const tmp = `${path}.${process.pid}.tmp`;
-	writeFileSync(tmp, contents, { mode: 0o600 });
-	chmodSync(tmp, 0o600);
-	renameSync(tmp, path);
-}
-
 export function readJson<T>(path: string): T | undefined {
 	try {
 		return JSON.parse(readFileSync(path, "utf8")) as T;
@@ -83,7 +74,7 @@ export function untrusted(kind: "EMAIL" | "CALENDAR", body: string): string {
 }
 
 /** Content must not be able to fake the end of its own block. */
-export function neutralize(text: string): string {
+function neutralize(text: string): string {
 	return text.replace(/<<<|>>>/g, (m) => m.split("").join(" "));
 }
 

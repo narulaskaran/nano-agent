@@ -1,4 +1,17 @@
-import { CAPABILITIES, DECIDE_MODEL, FORMATS, PRESETS, ROLES, formCapabilities, publicProvider, serves } from "./providers.mjs";
+import {
+	CAPABILITIES,
+	DECIDE_MODEL,
+	FORMATS,
+	PRESETS,
+	ROLES,
+	deleteProvider,
+	formCapabilities,
+	publicProvider,
+	saveProvider,
+	saveRoles,
+	serves,
+	testProvider,
+} from "./providers.mjs";
 
 // Shared page helpers. portal.mjs reuses these for the credential forms so every
 // page speaks one visual language. All output is escaped, server rendered, no script.
@@ -34,18 +47,17 @@ export const settingsNav = (active = "credentials") =>
 	`<nav aria-label="Vault sections">${SECTIONS.map(([id, href, label]) => `<a href="${href}"${id === active ? ' aria-current="page"' : ""}>${label}</a>`).join("")}</nav>`;
 
 const head = (title, lede) => `<header class="page-head"><h1>${title}</h1>${lede ? `<p class="lede">${lede}</p>` : ""}</header>`;
-const formats = FORMATS;
 
 function providerCard(p, token) {
 	return `<article class="card provider">
 <div class="card-head"><h3>${esc(p.name)}</h3><span class="badge ${p.local ? "local" : "hosted"}">${p.local ? "Local network" : "Hosted"}</span></div>
 <p class="url">${esc(p.baseUrl)}</p>
-<dl class="meta"><dt>Format</dt><dd>${esc(formats[p.format])}</dd><dt>Used for</dt><dd>${p.capabilities.map((c) => `<span class="chip">${esc(c)}</span>`).join(" ")}</dd><dt>API key</dt><dd>${p.hasKey ? "Saved" : "None"}</dd></dl>
+<dl class="meta"><dt>Format</dt><dd>${esc(FORMATS[p.format])}</dd><dt>Used for</dt><dd>${p.capabilities.map((c) => `<span class="chip">${esc(c)}</span>`).join(" ")}</dd><dt>API key</dt><dd>${p.hasKey ? "Saved" : "None"}</dd></dl>
 <div class="card-actions"><form method="post" action="/providers/test">${csrf(token)}${hidden("id", p.id)}<button class="ghost">Test connection</button></form><a class="act" href="/providers/edit?id=${encodeURIComponent(p.id)}">Edit connection</a></div>
 </article>`;
 }
 
-export function providersPage(data, token) {
+function providersPage(data, token) {
 	const providers = (data.providers ?? []).map(publicProvider);
 	const saved = providers.length
 		? `<div class="cards">${providers.map((p) => providerCard(p, token)).join("")}</div>`
@@ -63,8 +75,7 @@ export function providersPage(data, token) {
 <div class="tiles">${tiles}</div></section>`;
 }
 
-export function providerForm(token, values, editing = false) {
-	const customOpen = values.format === "custom";
+function providerForm(token, values, editing = false) {
 	const authOpen = Boolean(values.authHeader);
 	const keyLabel = editing && values.hasKey ? "API key" : "API key (optional for local services)";
 	const keyHint = editing && values.hasKey ? "A key is saved. Enter a new one to replace it, or leave blank to keep it. Changing the base URL clears the saved key unless you enter it again." : "Changing the base URL clears the saved key unless you enter it again.";
@@ -94,7 +105,6 @@ ${editing ? check("Remove saved API key", "removeKey", false) : ""}
 ${field("Authentication header", "authHeader", values.authHeader || "", { hint: "Default depends on the API format." })}
 ${field("Authentication prefix", "authPrefix", values.authPrefix ?? (values.format === "anthropic" ? "" : "Bearer "), { hint: "For example Bearer followed by a space." })}
 </details>
-<details${customOpen ? " open" : ""}><summary>Advanced: custom API shape</summary><p class="hint">For Custom format, enter JSON mappings for enabled capabilities (chat, stt, tts). Each has a path, request template and response field paths. Available variables: {{model}}, {{messages}}, {{system}}, {{tools}}, {{text}}, {{audio_base64}}, {{voice}}, {{max_tokens}}. Exact placeholders preserve JSON types. Put credentials in the API key field. Chat toolCalls, when mapped, must use compatible function-call objects. TTS returns audio bytes, or set response.audio to a base64 field path.</p><div class="field"><label for="f-custom">Mapping JSON</label><textarea id="f-custom" class="mono" name="custom" rows="12" spellcheck="false" autocapitalize="none">${esc(typeof values.custom === "string" ? values.custom : JSON.stringify(values.custom || { healthPath: "/health", chat: { path: "/generate", request: { model: "{{model}}", messages: "{{messages}}", tools: "{{tools}}" }, response: { text: "result.text", toolCalls: "result.tool_calls" } } }, null, 2))}</textarea></div></details>
 </section>
 <div class="actions"><button>Save connection</button><a class="btn ghost" href="/providers">Cancel</a></div></form>
 ${editing ? `<form class="danger-zone" method="post" action="/providers/delete">${csrf(token)}${hidden("id", values.id)}<button class="danger">Delete connection</button><p class="hint">Connections assigned to a job cannot be deleted.</p></form>` : ""}</div>`;
@@ -130,7 +140,7 @@ function routeFields(role, route, providers, fallback = false) {
 	const unset = fallback ? "No fallback" : role === "background" ? "Follow main conversation" : role === "decide" ? "Follow main conversation (when it is OpenRouter)" : "Use environment / existing configuration";
 	return `${select(fallback ? "Fallback connection" : "Connection", `${prefix}provider`, [["", unset], ...available.map((p) => [p.id, p.name])], route?.provider || "", fallback ? "Used for outages or rate limits." : none)}
 ${field("Model ID", `${prefix}model`, route?.model, { extra: 'list="model-ids"', hint: modelHint })}
-${role === "tts" ? field("Voice", `${prefix}voice`, route?.voice, { hint: fallback ? "" : "Compatible and custom APIs use this voice setting. Woof uses the voice configured by its service." }) : ""}`;
+${role === "tts" ? field("Voice", `${prefix}voice`, route?.voice, { hint: fallback ? "" : "Compatible APIs use this voice setting. Woof uses the voice configured by its service." }) : ""}`;
 }
 const contextField = (prefix, route) =>
 	field("Context window (tokens)", `${prefix}contextWindow`, route?.contextWindow || 32768, { type: "number", extra: 'min="2048" max="10000000"' });
@@ -152,7 +162,7 @@ ${chat ? contextField(`${role}_`, route) : ""}
 </section>`;
 }
 
-export function modelsPage(data, token, catalogs = new Map()) {
+function modelsPage(data, token, catalogs = new Map()) {
 	const providers = data.providers ?? [];
 	return `${head("Models &amp; voice", "Choose a connection and model for each job. Saved changes apply to the next model or speech request. A request already sent finishes with its current provider.")}
 <form method="post" action="/models/save">${csrf(token)}
@@ -178,7 +188,6 @@ export async function providerPage(url, options, token) {
 	return null;
 }
 export async function providerPost(path, form, options) {
-	const { saveProvider, saveRoles, deleteProvider, testProvider } = await import("./providers.mjs");
 	try {
 		if (path === "/providers/save") {
 			options.write((data) => saveProvider(data, form));

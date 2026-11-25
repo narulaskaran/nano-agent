@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import { awaitToolResponse, cardFields, deliverToolResponse, fillPlaceholders, hasPlaceholders, interactiveOnly, parseArgs, redact } from "../lib/browser.mjs";
 
@@ -56,12 +55,6 @@ test("parseArgs separates flags from positionals", () => {
 });
 
 test("WebMCP responses resolve from the event and leave the map empty", async () => {
-	const source = readFileSync(new URL("../lib/browser.mjs", import.meta.url), "utf8");
-	assert.match(source, /deliverToolResponse\(state\.responses, event\)/);
-	assert.match(source, /awaitToolResponse\(state\.responses, invocationId/);
-	assert.doesNotMatch(source, /state\.responses\.has\(/);
-	assert.doesNotMatch(source, /while \(!state\.responses/);
-
 	const responses = new Map();
 	deliverToolResponse(responses, { invocationId: "early", status: "success", output: { ok: true } });
 	assert.equal((await awaitToolResponse(responses, "early", 1000)).status, "success");

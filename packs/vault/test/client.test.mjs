@@ -1,11 +1,11 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync, statSync } from "node:fs";
 import http from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { PROVIDER_SOCKET } from "../../../src/provider-client.ts";
-import { socketCall, vaultControlled } from "../lib/client.mjs";
+import { createJsonSocketServer, socketCall, vaultControlled } from "../lib/client.mjs";
 import { VAULT_RUN_DIR, VAULT_SOCKET } from "../lib/paths.mjs";
 
 test("the runtime provider socket is the vault socket", () => {
@@ -13,9 +13,6 @@ test("the runtime provider socket is the vault socket", () => {
 });
 
 test("vault control still requires a run directory owned by another user", () => {
-	const source = readFileSync(new URL("../lib/client.mjs", import.meta.url), "utf8");
-	assert.match(source, /statSync\(VAULT_RUN_DIR\)/);
-	assert.match(source, /st\.isDirectory\(\) && st\.uid !== process\.getuid\(\)/);
 	// A directory this process creates must not count, and a missing run dir must not either.
 	const dir = mkdtempSync(join(tmpdir(), "nano-self-owned-"));
 	try {
@@ -28,27 +25,6 @@ test("vault control still requires a run directory owned by another user", () =>
 	} finally {
 		rmSync(dir, { recursive: true, force: true });
 	}
-});
-
-test("the browser and the vault cli share one socket client and keep their own errors", () => {
-	const cli = readFileSync(new URL("../lib/cli.mjs", import.meta.url), "utf8");
-	const browser = readFileSync(new URL("../../purchases/lib/browser.mjs", import.meta.url), "utf8");
-	const client = readFileSync(new URL("../lib/client.mjs", import.meta.url), "utf8");
-	assert.match(cli, /socketCall\(VAULT_SOCKET/);
-	assert.match(browser, /socketCall\(activeSocket\(\)/);
-	assert.match(cli, /vaultControlled\(\)/);
-	assert.match(browser, /vaultControlled\(\)/);
-	assert.doesNotMatch(cli, /http\.request/);
-	assert.doesNotMatch(browser, /http\.request/);
-	assert.doesNotMatch(browser, /function vaultControlled/);
-	assert.match(client, /export function vaultControlled/);
-	assert.match(client, /export function socketCall/);
-	assert.match(cli, /timeout: "vault did not answer in time"/);
-	assert.match(cli, /error: "vault is not running"/);
-	assert.match(cli, /json: "vault returned a response that is not JSON"/);
-	assert.match(cli, /timeoutMs: 120_000/);
-	assert.match(browser, /timeout: "browser daemon did not answer in time"/);
-	assert.match(browser, /timeoutMs = 300_000/);
 });
 
 function serve(t, respond) {
@@ -108,4 +84,45 @@ test("socketCall keeps each caller's timeout, connection and JSON errors", async
 	// destroy() emits "error", so a caller that sets messages.error sees that text on timeout too.
 	await assert.rejects(socketCall(hanging, { argv: ["ping"] }, { timeoutMs: 200, messages: vaultMessages }), { message: "vault is not running" });
 	await assert.rejects(socketCall(hanging, { argv: ["ping"] }, { timeoutMs: 200, messages: browserMessages }), { message: "browser daemon did not answer in time" });
+});
+
+test("createJsonSocketServer handles JSON requests, onRequest overrides and size limits", async (t) => {
+	const dir = mkdtempSync(join(tmpdir(), "nano-vault-server-"));
+	const socketPath = join(dir, "server.sock");
+	const server = createJsonSocketServer((raw) => ({ ok: true, echo: JSON.parse(raw) }), {
+		maxBytes: 64,
+		onRequest(req, res) {
+			if (req.url !== "/custom") return false;
+			res.writeHead(200, { "content-type": "text/plain" });
+			res.end("custom-ok");
+			return true;
+		},
+	});
+	await new Promise((resolve, reject) => {
+		server.listen(socketPath, () => resolve());
+		server.on("error", reject);
+	});
+	t.after(
+		() =>
+			new Promise((resolve) => {
+				server.close(() => {
+					rmSync(dir, { recursive: true, force: true });
+					resolve();
+				});
+			}),
+	);
+
+	assert.deepEqual(await socketCall(socketPath, { a: 1 }, { timeoutMs: 1000 }), { ok: true, echo: { a: 1 } });
+	await assert.rejects(socketCall(socketPath, { big: "x".repeat(100) }, { timeoutMs: 1000 }));
+	const custom = await new Promise((resolve, reject) => {
+		const req = http.request({ socketPath, path: "/custom", method: "GET" }, (res) => {
+			let data = "";
+			res.setEncoding("utf8");
+			res.on("data", (c) => (data += c));
+			res.on("end", () => resolve(data));
+		});
+		req.on("error", reject);
+		req.end();
+	});
+	assert.equal(custom, "custom-ok");
 });

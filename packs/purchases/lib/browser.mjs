@@ -9,13 +9,12 @@
 import { execFile, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { chmodSync, existsSync, mkdirSync, openSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import http from "node:http";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
-import { socketCall, vaultControlled } from "../../vault/lib/client.mjs";
+import { createJsonSocketServer, socketCall, vaultControlled } from "../../vault/lib/client.mjs";
 import { VAULT_SOCKET } from "../../vault/lib/paths.mjs";
 
 const SELF = fileURLToPath(import.meta.url);
@@ -312,30 +311,35 @@ async function spendRequest(id, include) {
 	return request;
 }
 
+async function retrieveCardFields(id) {
+	if (!id) throw new Error("{{card.*}} placeholders need --spend-request <lsrq_...>");
+	const request = await spendRequest(id, "card");
+	if (!request.card?.number) throw new Error("that spend request has no card credential (is it a card request?)");
+	return cardFields(request.card);
+}
+
+async function retrieveLinkPayToken(id) {
+	const request = await spendRequest(id, "link_pay_token");
+	const token = typeof request.link_pay_token === "string" ? request.link_pay_token : request.link_pay_token?.token;
+	if (!token) throw new Error("that spend request returned no Link Pay Token");
+	return token;
+}
+
 /** Resolve Link card data in this process. The returned object is never printed. */
 async function cardSideChannel(argv) {
 	const [command, ...rest] = argv;
 	const { positional, flags } = parseArgs(rest, ["full", "force", "slow", "submit", "verify-digits"]);
-	if (command === "lpt" && positional[0] === "fill") {
-		const request = await spendRequest(positional[1], "link_pay_token");
-		const token = typeof request.link_pay_token === "string" ? request.link_pay_token : request.link_pay_token?.token;
-		if (!token) throw new Error("that spend request returned no Link Pay Token");
-		return { token };
-	}
+	if (command === "lpt" && positional[0] === "fill") return { token: await retrieveLinkPayToken(positional[1]) };
 	if (!hasPlaceholders(positional.join(" "))) return undefined;
-	if (!flags["spend-request"]) throw new Error("{{card.*}} placeholders need --spend-request <lsrq_...>");
-	const request = await spendRequest(flags["spend-request"], "card");
-	if (!request.card?.number) throw new Error("that spend request has no card credential (is it a card request?)");
-	return { fields: cardFields(request.card) };
+	return { fields: await retrieveCardFields(flags["spend-request"]) };
 }
 
 function clientShotPath(argv) {
 	const { positional } = parseArgs(argv.slice(1), ["full"]);
 	const arg = positional[0];
 	if (!arg) {
-		const dir = join(DATA, "browser", "screenshots");
-		mkdirSync(dir, { recursive: true });
-		return join(dir, `shot-${new Date().toISOString().replace(/[:.]/g, "-")}.png`);
+		mkdirSync(SHOTS, { recursive: true });
+		return join(SHOTS, `shot-${new Date().toISOString().replace(/[:.]/g, "-")}.png`);
 	}
 	return isAbsolute(arg) ? arg : resolve(process.cwd(), arg);
 }
@@ -643,10 +647,7 @@ export function createBrowserHost(options = {}) {
 			fields = requestCard?.fields;
 			if (!fields) throw new Error("{{card.*}} placeholders need --spend-request <lsrq_...>");
 		} else {
-			if (!flags["spend-request"]) throw new Error("{{card.*}} placeholders need --spend-request <lsrq_...>");
-			const request = await spendRequest(flags["spend-request"], "card");
-			if (!request.card?.number) throw new Error("that spend request has no card credential (is it a card request?)");
-			fields = cardFields(request.card);
+			fields = await retrieveCardFields(flags["spend-request"]);
 		}
 		secrets.add(fields.number);
 		secrets.add(String(fields.number).replace(/(\d{4})(?=\d)/g, "$1 "));
@@ -1075,13 +1076,7 @@ export function createBrowserHost(options = {}) {
 			}
 			if (action !== "fill") throw new Error("usage: browser lpt detect | browser lpt fill <lsrq_...>");
 			if (!usable) throw new Error("no usable Link Pay Token block on this page (run `browser lpt detect`)");
-			let token;
-			if (vault) {
-				token = requestCard?.token;
-			} else {
-				const request = await spendRequest(id, "link_pay_token");
-				token = typeof request.link_pay_token === "string" ? request.link_pay_token : request.link_pay_token?.token;
-			}
+			const token = vault ? requestCard?.token : await retrieveLinkPayToken(id);
 			if (!token) throw new Error("that spend request returned no Link Pay Token");
 			secrets.add(token);
 			await usable.frame.evaluate((value) => {
@@ -1122,32 +1117,22 @@ export function createBrowserHost(options = {}) {
 	if (vault) return { handle };
 
 	let queue = Promise.resolve();
-	const server = http.createServer((req, res) => {
-		let body = "";
-		req.setEncoding("utf8");
-		req.on("data", (chunk) => {
-			body += chunk;
-			if (body.length > 2_000_000) req.destroy();
-		});
-		req.on("end", () => {
-			queue = queue.then(async () => {
-				clearTimeout(idle);
-				let reply;
-				try {
-					const parsed = JSON.parse(body);
-					const result = await handle({ argv: parsed.argv ?? [], cwd: parsed.cwd, card: parsed.card });
-					reply = { ok: true, text: result.text, ...(result.png ? { png: result.png } : {}) };
-				} catch (error) {
-					const message = String(error?.message ?? error).split("\n").slice(0, 6).join("\n");
-					reply = { ok: false, text: out(`error: ${message}`) };
-				}
+	const server = createJsonSocketServer((body) => {
+		const run = queue.then(async () => {
+			clearTimeout(idle);
+			try {
+				const parsed = JSON.parse(body);
+				const result = await handle({ argv: parsed.argv ?? [], cwd: parsed.cwd, card: parsed.card });
+				return { ok: true, text: result.text, ...(result.png ? { png: result.png } : {}) };
+			} catch (error) {
+				const message = String(error?.message ?? error).split("\n").slice(0, 6).join("\n");
+				return { ok: false, text: out(`error: ${message}`) };
+			} finally {
 				if (IDLE_MS > 0) idle = setTimeout(() => void commands.close(), IDLE_MS);
-				if (!res.writableEnded) {
-					res.writeHead(200, { "content-type": "application/json" });
-					res.end(JSON.stringify(reply));
-				}
-			});
+			}
 		});
+		queue = run.catch(() => {});
+		return run;
 	});
 
 	void (async () => {

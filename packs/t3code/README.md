@@ -21,7 +21,7 @@ The pairing code never reaches the model: the pack redeems it and replaces it in
 
 ## What Nano can do in T3 Code
 
-Only these tools are exposed, loaded on demand: `t3_project_list`, `t3_project_read`, `t3_thread_search`, `t3_thread_list`, `t3_thread_read`, `t3_thread_launch`, `t3_thread_send`, `t3_thread_interrupt`. It cannot create, change or delete projects, settings, scheduled tasks, previews or devices. To change this list, see [mcp.json.example](mcp.json.example).
+Only these tools are exposed, loaded on demand: `t3_project_list`, `t3_project_read`, `t3_thread_search`, `t3_thread_list`, `t3_thread_read`, `t3_thread_launch`, `t3_thread_send`, `t3_thread_interrupt`. It cannot create, change or delete projects, settings, scheduled tasks, previews or devices. To change this list, edit `T3_TOOLS` in `auth.ts`.
 
 Your access level is the ceiling on the threads Nano starts. Nano cannot approve actions inside a thread: with `approval-required`, threads wait for you in T3 Code, and Nano tells you when one is waiting.
 

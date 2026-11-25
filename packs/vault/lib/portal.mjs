@@ -169,7 +169,7 @@ export function originMatchesHost(origin, host) {
 	}
 }
 
-export function chooseBind(configured, addresses) {
+function chooseBind(configured, addresses) {
 	const bind = String(configured ?? "").trim();
 	if (bind) {
 		if (bind === "0.0.0.0" || bind === "::" || bind === "*") throw new Error("NANO_VAULT_BIND must name one address");

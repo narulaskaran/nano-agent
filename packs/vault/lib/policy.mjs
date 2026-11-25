@@ -42,7 +42,7 @@ export function loginUrlAllowed(raw, site, { allowHttpLoopback = false } = {}) {
 	return Boolean(allowHttpLoopback && url.protocol === "http:" && url.hostname === "127.0.0.1");
 }
 
-export function urlMatchesSite(raw, site) {
+function urlMatchesSite(raw, site) {
 	let url;
 	try {
 		url = new URL(raw);

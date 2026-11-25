@@ -1,6 +1,7 @@
 import { createHash, randomBytes } from "node:crypto";
-import { chmodSync, chownSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
+import { writePrivateFile } from "../../src/json-store.ts";
 
 /**
  * T3 Code's `/mcp` endpoint takes OAuth 2.1 bearer tokens from its own authorization server
@@ -12,13 +13,13 @@ import { join } from "node:path";
  * redirect URI is never visited; the decision endpoint returns it as data.
  */
 
-export const DEFAULT_T3CODE_URL = "http://127.0.0.1:4096";
+const DEFAULT_T3CODE_URL = "http://127.0.0.1:4096";
 export const ACCESS_LEVELS = ["read-only", "approval-required", "auto-accept-edits", "auto", "full-access"] as const;
-export type T3Access = (typeof ACCESS_LEVELS)[number];
+type T3Access = (typeof ACCESS_LEVELS)[number];
 export const DEFAULT_ACCESS: T3Access = "approval-required";
 
 /** Tools Nano may reach. Everything else the server offers (project deletion, settings, schedules) stays hidden. */
-export const T3_TOOLS = [
+const T3_TOOLS = [
 	"t3_project_list",
 	"t3_project_read",
 	"t3_thread_search",
@@ -32,7 +33,7 @@ export const T3_TOOLS = [
 const CLIENT_NAME = "Nano";
 const REDIRECT_URI = "http://127.0.0.1/callback";
 
-export interface T3Credentials {
+interface T3Credentials {
 	/** Origin of the T3 Code server, e.g. http://127.0.0.1:4096. */
 	url: string;
 	token: string;
@@ -68,19 +69,7 @@ export function readCredentials(dataDir: string): T3Credentials | undefined {
 }
 
 export function writeCredentials(dataDir: string, credentials: T3Credentials): void {
-	const dir = join(dataDir, "t3code");
-	const path = credentialsPath(dataDir);
-	mkdirSync(dir, { recursive: true, mode: 0o700 });
-	const tmp = `${path}.tmp`;
-	writeFileSync(tmp, JSON.stringify(credentials, null, 2), { mode: 0o600 });
-	chmodSync(tmp, 0o600);
-	// `docker exec` runs as root; Nano itself runs as the owner of the data directory.
-	if (process.getuid?.() === 0) {
-		const { uid, gid } = statSync(dataDir);
-		chownSync(dir, uid, gid);
-		chownSync(tmp, uid, gid);
-	}
-	renameSync(tmp, path);
+	writePrivateFile(credentialsPath(dataDir), JSON.stringify(credentials, null, 2), { ownerOf: dataDir });
 }
 
 export function removeCredentials(dataDir: string): boolean {
@@ -179,7 +168,7 @@ export async function pairWithCode(options: { url: string; code: string; access:
 	};
 }
 
-export type TokenCheck = { ok: true } | { ok: false; reason: "unauthorized" | "unreachable" | "unexpected"; detail: string };
+type TokenCheck = { ok: true } | { ok: false; reason: "unauthorized" | "unreachable" | "unexpected"; detail: string };
 
 /** Ask `/mcp` to initialize with the token. Reads nothing and changes nothing in T3 Code. */
 export async function checkToken(url: string, token: string): Promise<TokenCheck> {

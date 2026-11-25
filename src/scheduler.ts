@@ -3,8 +3,8 @@ import { randomBytes } from "node:crypto";
 import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { type Config, currentTimezone } from "./config.ts";
-import { createDecider, type Decider, DecisionError } from "./decide.ts";
-import { type Gate, type GateSent, type GateVerdict, logGate, rememberSent, runGate, validateGate } from "./gate.ts";
+import { createDecider, type Decider, DecisionError, logDecisionEvent } from "./decide.ts";
+import { type Gate, type GateSent, type GateVerdict, rememberSent, runGate, validateGate } from "./gate.ts";
 import { readJsonFile, writeJsonFile } from "./json-store.ts";
 import { isSilent } from "./tasks.ts";
 import { isTransient } from "./transient.ts";
@@ -46,7 +46,7 @@ export interface Job {
 	gateSent?: GateSent[];
 }
 
-export interface SchedulerOptions {
+interface SchedulerOptions {
 	/** Gate decisions and failure triage. Defaults to one built from config. Tests inject a fake. */
 	decider?: Decider;
 }
@@ -56,7 +56,7 @@ export interface SchedulerOptions {
  * run; a real or lasting failure gets one repair attempt by a background worker; if the job still
  * fails after that, the owner is told once. A success ends the streak.
  */
-export interface JobHealth {
+interface JobHealth {
 	/** Consecutive failed runs. Zero means healthy. */
 	failures: number;
 	/** When the current failure streak started. */
@@ -94,7 +94,7 @@ const SCRIPT_TIMEOUT_MS = 120_000;
 export const RETRY_MS = 10 * 60_000;
 /** A transient failure stops counting as transient after this many runs in a row, or this long. */
 export const TRANSIENT_RUNS = 3;
-export const TRANSIENT_MS = 60 * 60_000;
+const TRANSIENT_MS = 60 * 60_000;
 /** After starting a repair, further failures stay quiet this long so the repair can finish. */
 export const REPAIR_GRACE_MS = 30 * 60_000;
 
@@ -212,7 +212,7 @@ export class Scheduler {
 	constructor(config: Config, sink: JobSink, options: SchedulerOptions = {}) {
 		this.config = config;
 		this.sink = sink;
-		this.decider = options.decider ?? createDecider({ dataDir: config.dataDir, refusePrivate: true });
+		this.decider = options.decider ?? createDecider({ dataDir: config.dataDir });
 		this.path = join(config.dataDir, "schedule.json");
 		const stored = readJsonFile<{ jobs?: Job[] } | null>(this.path, null);
 		if (Array.isArray(stored?.jobs)) this.jobs = stored.jobs;
@@ -398,7 +398,7 @@ export class Scheduler {
 			if (job?.gate) {
 				// What the agent made of output the gate let through: the other half of the gate's record.
 				const told = !isSilent(task.result) && Boolean(task.result?.trim());
-				logGate(this.gateLogPath(), { job: job.id, agent: told ? "notify" : "quiet" });
+				logDecisionEvent(this.gateLogPath(), "gate", { job: job.id, agent: told ? "notify" : "quiet" });
 				if (told) this.remember(job, task.result as string, now);
 			}
 			return;
@@ -558,7 +558,7 @@ export class Scheduler {
 			private: job.private,
 		});
 		const action = verdict.notify ? "go" : gate.shadow ? "go (shadow)" : "quiet";
-		logGate(this.gateLogPath(), { job: job.id, gate: verdict.answer, p: Number(verdict.p.toFixed(3)), min: gate.min, shadow: gate.shadow || undefined, action, error: verdict.error, chars: output.length });
+		logDecisionEvent(this.gateLogPath(), "gate", { job: job.id, gate: verdict.answer, p: Number(verdict.p.toFixed(3)), min: gate.min, shadow: gate.shadow || undefined, action, error: verdict.error, chars: output.length });
 		console.error(`nano: gate on job ${job.id} (${job.name}): ${verdict.answer}${verdict.p ? ` ${verdict.p.toFixed(2)}` : ""} -> ${action}${verdict.error ? ` (${verdict.error})` : ""}`);
 		return verdict;
 	}

@@ -1,4 +1,4 @@
-import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
+import { appendFileSync, chmodSync, chownSync, existsSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 
 /**
@@ -23,6 +23,25 @@ export function readJsonFile<T>(path: string, fallback: T): T {
 export function writeJsonFile(path: string, data: unknown): void {
 	const tmp = `${path}.tmp`;
 	writeFileSync(tmp, JSON.stringify(data, null, 2));
+	renameSync(tmp, path);
+}
+
+/**
+ * Write a mode-0600 file atomically inside a mode-0700 parent directory.
+ * When `ownerOf` is given and this process runs as root (e.g. `docker exec`),
+ * the directory and file take that path's uid/gid so Nano can still read them.
+ */
+export function writePrivateFile(path: string, contents: string | Buffer, options?: { ownerOf?: string }): void {
+	const dir = dirname(path);
+	mkdirSync(dir, { recursive: true, mode: 0o700 });
+	const tmp = `${path}.${process.pid}.tmp`;
+	writeFileSync(tmp, contents, { mode: 0o600 });
+	chmodSync(tmp, 0o600);
+	if (options?.ownerOf && process.getuid?.() === 0) {
+		const { uid, gid } = statSync(options.ownerOf);
+		chownSync(dir, uid, gid);
+		chownSync(tmp, uid, gid);
+	}
 	renameSync(tmp, path);
 }
 

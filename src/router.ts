@@ -1,5 +1,4 @@
-import { confident, type Decider, type DecisionRequest, LOG_MAX_BYTES, top } from "./decide.ts";
-import { appendJsonLine } from "./json-store.ts";
+import { confident, type Decider, type DecisionRequest, top } from "./decide.ts";
 
 /**
  * The inbound router: one decision from the decision model per owner message, before any model turn,
@@ -20,7 +19,7 @@ export interface RecentTurn {
 	at: number;
 }
 
-export interface RouteInput {
+interface RouteInput {
 	message: string;
 	/** Earlier turns, oldest first, not including this message. */
 	recent: RecentTurn[];
@@ -52,13 +51,13 @@ export interface Route {
 	error?: string;
 }
 
-export const NO_REPLY_MIN = 0.95;
-export const LONG_MIN = 0.8;
-export const NEW_TOPIC_MIN = 0.85;
-export const SKILL_MIN = 0.75;
-export const SIMPLE_MIN = 0.9;
-export const REMEMBER_MIN = 0.85;
-export const TASK_MIN = 0.8;
+const NO_REPLY_MIN = 0.95;
+const LONG_MIN = 0.8;
+const NEW_TOPIC_MIN = 0.85;
+const SKILL_MIN = 0.75;
+const SIMPLE_MIN = 0.9;
+const REMEMBER_MIN = 0.85;
+const TASK_MIN = 0.8;
 const SKILL_DESCRIPTION_CHARS = 300;
 const TIMEOUT_MS = 4000;
 const RECENT_TURNS = 6;
@@ -157,10 +156,9 @@ export function routeRequest(input: RouteInput): DecisionRequest {
 	};
 }
 
-export async function route(input: RouteInput, options: { decider: Decider; now?: () => number }): Promise<Route> {
-	const now = options.now ?? Date.now;
-	const started = now();
-	const fallback = (error: string): Route => ({ noReply: false, long: false, newTopic: false, simple: false, remember: false, answers: {}, ms: now() - started, error: error.slice(0, 300) });
+export async function route(input: RouteInput, options: { decider: Decider }): Promise<Route> {
+	const started = Date.now();
+	const fallback = (error: string): Route => ({ noReply: false, long: false, newTopic: false, simple: false, remember: false, answers: {}, ms: Date.now() - started, error: error.slice(0, 300) });
 	try {
 		const response = await options.decider.decide(routeRequest(input), { source: "router", signal: AbortSignal.timeout(TIMEOUT_MS) });
 		const answers: Route["answers"] = {};
@@ -180,14 +178,9 @@ export async function route(input: RouteInput, options: { decider: Decider; now?
 			remember: chosen("remember", { yes: REMEMBER_MIN }) === "yes",
 			task: named("task", TASK_MIN),
 			answers,
-			ms: now() - started,
+			ms: Date.now() - started,
 		};
 	} catch (error) {
 		return fallback((error as Error)?.message ?? String(error));
 	}
-}
-
-/** One line per routed message in <data>/router.jsonl: answers, probabilities and actions, never the text. */
-export function logRoute(path: string, entry: Record<string, unknown>): void {
-	appendJsonLine(path, { at: new Date().toISOString(), ...entry }, "router", LOG_MAX_BYTES);
 }

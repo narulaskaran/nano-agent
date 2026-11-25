@@ -1,5 +1,4 @@
-import { confident, type Decider, type DecisionRequest, DecisionError, LOG_MAX_BYTES, top } from "./decide.ts";
-import { appendJsonLine } from "./json-store.ts";
+import { confident, type Decider, type DecisionRequest, DecisionError, top } from "./decide.ts";
 
 /**
  * The attention gate: a script job's output is a set of facts, and the decision model (decide.ts) answers
@@ -31,8 +30,8 @@ export interface GateVerdict {
 	error?: string;
 }
 
-export const DEFAULT_MIN = 0.8;
-export const KEEP_SENT = 5;
+const DEFAULT_MIN = 0.8;
+const KEEP_SENT = 5;
 const SENT_CHARS = 600;
 const OUTPUT_CHARS = 6000;
 
@@ -97,9 +96,4 @@ export async function runGate(input: {
 export function rememberSent(sent: GateSent[] | undefined, text: string, at: number): GateSent[] {
 	const clipped = text.trim().slice(0, SENT_CHARS);
 	return [...(sent ?? []), { at, text: clipped }].slice(-KEEP_SENT);
-}
-
-/** One line per gate event in <data>/gate.jsonl: verdicts, and what the agent did after, for tuning `min`. No output text. */
-export function logGate(path: string, entry: Record<string, unknown>): void {
-	appendJsonLine(path, { at: new Date().toISOString(), ...entry }, "gate", LOG_MAX_BYTES);
 }

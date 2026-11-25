@@ -3,14 +3,14 @@ import { dirname, join } from "node:path";
 import type { Config } from "./config.ts";
 import { skillPaths } from "./packs.ts";
 
-export interface SkillInfo {
+interface SkillInfo {
 	name: string;
 	description: string;
 	path: string;
 }
 
 /** Name and description from a SKILL.md's frontmatter. */
-export function parseSkill(text: string): { name?: string; description?: string } {
+function parseSkill(text: string): { name?: string; description?: string } {
 	const front = /^---\r?\n([\s\S]*?)\r?\n---/.exec(text)?.[1] ?? "";
 	const field = (key: string) => new RegExp(`^${key}:\\s*(.+)$`, "m").exec(front)?.[1]?.trim().replace(/^["']|["']$/g, "");
 	return { name: field("name"), description: field("description") };

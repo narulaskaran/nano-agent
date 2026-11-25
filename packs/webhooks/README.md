@@ -1,8 +1,10 @@
 # Webhook ingress
 
-The receiver accepts authenticated Ombi events and adds plain owner messages to
-Nano's durable event outbox. Run it as a separate process so it can accept events
-while Nano is down. Python 3.12 and its standard library are sufficient.
+The receiver accepts authenticated Ombi events (writing plain owner messages to
+Nano's durable event outbox) and optional Svix-signed AgentMail inbox delivery
+notifications (touching a trigger file to wake the inbox poller). Run it as a
+separate process so it can accept events while Nano is down. Python 3.12 and its
+standard library are sufficient.
 
 1. Create a dedicated spool owned by the account Nano runs as, with mode 0700.
    Run the receiver as that same account and give both processes write access to
@@ -31,6 +33,11 @@ receiver depend on the source for retry or reconciliation.
 
 Add future providers as explicit routes with their own authentication and
 schema. Webhook data never chooses the recipient or becomes task instructions.
+
+To also accept AgentMail deliveries on `/webhooks/agentmail-inbound` from the
+same receiver, pass `--agentmail-secret-file <secret>`,
+`--agentmail-inbox-file <inbox>` and `--agentmail-trigger-file <path>`. Each
+verified `message.received` delivery for that inbox touches the trigger file.
 
 Run the receiver tests with
 `python3 -m unittest discover -s packs/webhooks -p 'test_*.py'`.

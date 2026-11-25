@@ -40,3 +40,31 @@ export function socketCall(socketPath, body, { timeoutMs, messages = {} } = {}) 
 		req.end(JSON.stringify(body));
 	});
 }
+
+/**
+ * Unix-socket HTTP server that reads one bounded UTF-8 JSON request body and writes one JSON reply.
+ * Optional `onRequest(req, res)` runs first and returns true when it owns the response.
+ */
+export function createJsonSocketServer(handler, { maxBytes = 2_000_000, onRequest } = {}) {
+	return http.createServer((req, res) => {
+		if (onRequest?.(req, res)) return;
+		const chunks = [];
+		let size = 0;
+		req.on("data", (chunk) => {
+			size += chunk.length;
+			if (size > maxBytes) req.destroy();
+			else chunks.push(chunk);
+		});
+		req.on("end", () => {
+			void Promise.resolve(handler(Buffer.concat(chunks).toString("utf8")))
+				.then((reply) => {
+					if (res.writableEnded) return;
+					res.writeHead(200, { "content-type": "application/json" });
+					res.end(JSON.stringify(reply));
+				})
+				.catch(() => {
+					if (!res.writableEnded) res.end();
+				});
+		});
+	});
+}

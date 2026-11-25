@@ -9,15 +9,15 @@ import { confident, type Decider, DecisionError, top } from "./decide.ts";
  * Undefined when the decision is unsure, the input is private, or the decision fails for good.
  * The caller then falls back to its regex.
  */
-export type FailureKind = "transient" | "fixable" | "owner";
-export type TriageResult = { kind: FailureKind; p?: number };
+type FailureKind = "transient" | "fixable" | "owner";
+type TriageResult = { kind: FailureKind; p?: number };
 
-export const TRIAGE_MIN = 0.8;
+const TRIAGE_MIN = 0.8;
 /**
  * "owner" skips the repair and messages the owner at once, so it must be near certain. A wrong "fixable" only costs
  * a repair worker that hands the problem back; a wrong "owner" pages the owner for something Nano could have fixed.
  */
-export const OWNER_MIN = 0.9;
+const OWNER_MIN = 0.9;
 
 export async function triageFailure(input: {
 	name: string;

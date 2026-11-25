@@ -13,7 +13,7 @@ import type { TaskRunner } from "./tasks.ts";
 import { nanoTools } from "./tools.ts";
 
 /** A channel that reaches no one: what a worker sends is kept for its result. */
-export function bufferedChannel(): { channel: Channel; texts: string[]; files: string[] } {
+function bufferedChannel(): { channel: Channel; texts: string[]; files: string[] } {
 	const texts: string[] = [];
 	const files: string[] = [];
 	const channel: Channel = {

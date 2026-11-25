@@ -25,6 +25,11 @@ export function decisionLogPath(dataDir: string): string {
 	return join(dataDir, "decisions.jsonl");
 }
 
+/** Append one timestamped JSONL entry to the decisions, router or gate log, rotating at LOG_MAX_BYTES. */
+export function logDecisionEvent(path: string, what: string, entry: Record<string, unknown>, at = Date.now()): void {
+	appendJsonLine(path, { at: new Date(at).toISOString(), ...entry }, what, LOG_MAX_BYTES);
+}
+
 /**
  * Why `decide` failed, as data. Callers branch on `reason` and do not read the message.
  * - unconfigured: nothing to call (no vault route, decision URL or OpenRouter key)
@@ -32,7 +37,7 @@ export function decisionLogPath(dataDir: string): string {
  * - invalid:      the call returned something that is not a usable answer
  * - private:      the input was refused before any request, because this decider does not send private material
  */
-export type DecisionErrorReason = "unconfigured" | "transient" | "invalid" | "private";
+type DecisionErrorReason = "unconfigured" | "transient" | "invalid" | "private";
 
 export class DecisionError extends Error {
 	readonly reason: DecisionErrorReason;
@@ -43,7 +48,7 @@ export class DecisionError extends Error {
 	}
 }
 
-export type Question =
+type Question =
 	| { type: "noul"; instructions: string; criteria?: { true?: string; false?: string } }
 	| { type: "choice"; instructions: string; criteria: Record<string, string> }
 	| { type: "score"; instructions: string; criteria: string[] };
@@ -54,12 +59,12 @@ export interface DecisionRequest {
 	questions: Record<string, Question>;
 }
 
-export type Answer =
+type Answer =
 	| { type: "noul"; noul: number }
 	| { type: "choice"; choice: string; confidence?: number | null; probabilities?: Record<string, number> }
 	| { type: "score"; score: number; confidence?: number | null; legend?: Record<string, string>; probabilities?: Record<string, number> };
 
-export interface DecisionResponse {
+interface DecisionResponse {
 	model: string;
 	answers: Record<string, Answer>;
 	usage?: { input_tokens: number; output_tokens: number };
@@ -106,7 +111,7 @@ function isOpenRouter(url: string): boolean {
 	}
 }
 
-export function validateRequest(request: DecisionRequest): void {
+function validateRequest(request: DecisionRequest): void {
 	const { state, questions } = request;
 	if (state === undefined || state === null || (typeof state === "string" && !state.trim())) throw new Error("a decision needs state to decide about");
 	const entries = Object.entries(questions ?? {});
@@ -137,14 +142,13 @@ export function buildQuestion(instruction: string, values: { yes?: string; no?: 
 	return { type: "noul", instructions: instruction, ...(Object.keys(criteria).length ? { criteria } : {}) };
 }
 
-export interface DecideOptions {
+interface DecideOptions {
 	transport?: Transport;
 	/** JSONL audit log. Holds answers, probabilities and a hash of the state, never the state or question text. */
 	logPath?: string;
 	/** Who asked, for the log (a script name, a job id). */
 	source?: string;
 	signal?: AbortSignal;
-	now?: () => number;
 }
 
 export async function decide(request: DecisionRequest, options: DecideOptions = {}): Promise<DecisionResponse> {
@@ -156,8 +160,7 @@ export async function decide(request: DecisionRequest, options: DecideOptions = 
 			"unconfigured",
 			"no decision model is configured: it needs a vault decision connection, NANO_DECIDE_URL with NANO_DECIDE_MODEL, or OPENROUTER_API_KEY",
 		);
-	const now = options.now ?? Date.now;
-	const started = now();
+	const started = Date.now();
 	let out: { status: number; text: string };
 	try {
 		out = await transport(JSON.stringify({ state: request.state, questions: request.questions }), options.signal);
@@ -183,28 +186,26 @@ export async function decide(request: DecisionRequest, options: DecideOptions = 
 		}
 	}
 	if (options.logPath) {
-		appendJsonLine(
+		logDecisionEvent(
 			options.logPath,
+			"decision",
 			{
-				at: new Date(started).toISOString(),
-				ms: now() - started,
+				ms: Date.now() - started,
 				source: options.source,
 				model: parsed.model,
 				state: stateFingerprint(request.state),
 				answers: parsed.answers,
 				usage: parsed.usage,
 			},
-			"decision",
-			LOG_MAX_BYTES,
+			started,
 		);
 	}
 	return parsed;
 }
 
-export interface DecisionCall {
+interface DecisionCall {
 	source?: string;
 	signal?: AbortSignal;
-	now?: () => number;
 	/** This input is private and must not leave the machine when the decider refuses private input. */
 	private?: boolean;
 }
@@ -219,19 +220,18 @@ export interface Decider {
 	decide(request: DecisionRequest, call?: DecisionCall): Promise<DecisionResponse>;
 }
 
-export function createDecider(options: { dataDir: string; transport?: Transport; refusePrivate?: boolean }): Decider {
+export function createDecider(options: { dataDir: string; transport?: Transport }): Decider {
 	const explicitTransport = Object.hasOwn(options, "transport");
 	const logPath = decisionLogPath(options.dataDir);
-	const refusePrivate = options.refusePrivate ?? true;
 	const allow = (input?: { private?: boolean }): void => {
-		if (refusePrivate && input?.private) throw new DecisionError("private", "private input is not sent to the decision model");
+		if (input?.private) throw new DecisionError("private", "private input is not sent to the decision model");
 	};
 	return {
 		allow,
 		async decide(request, call = {}) {
 			allow(call);
 			const transport = explicitTransport ? options.transport : decisionTransport();
-			return decide(request, { transport, logPath, source: call.source, signal: call.signal, now: call.now });
+			return decide(request, { transport, logPath, source: call.source, signal: call.signal });
 		},
 	};
 }
@@ -288,7 +288,7 @@ function isTransientFailure(error: unknown): boolean {
 	return visit(error);
 }
 
-export function stateFingerprint(state: DecisionRequest["state"]): { sha256: string; chars: number } {
+function stateFingerprint(state: DecisionRequest["state"]): { sha256: string; chars: number } {
 	const text = typeof state === "string" ? state : JSON.stringify(state);
 	return { sha256: createHash("sha256").update(text).digest("hex").slice(0, 16), chars: text.length };
 }

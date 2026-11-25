@@ -8,8 +8,9 @@ import { fileURLToPath } from "node:url";
  * the API key's remaining spend limit, answering 402 once the limit is within reach of that reserve.
  */
 export const MAX_OUTPUT_TOKENS = 65_536;
+export const DEFAULT_LOCAL_CONTEXT = 32_768;
 
-export const INBOUND_MODES = ["interrupt", "steer", "queue"] as const;
+const INBOUND_MODES = ["interrupt", "steer", "queue"] as const;
 
 export interface Config {
 	channel: "photon" | "stdin";
@@ -66,12 +67,22 @@ export interface LocalModel {
 	contextWindow: number;
 }
 
+/** Local model routed through the vault daemon's `local` role. */
+export function vaultLocalModel(route: { model: string; contextWindow?: number }): LocalModel {
+	return {
+		modelId: route.model,
+		baseUrl: "http://nano-vault/local",
+		contextWindow: route.contextWindow || DEFAULT_LOCAL_CONTEXT,
+		vault: true,
+	};
+}
+
 /** The local model role from the environment, or undefined when it is not configured. */
 export function loadLocalModel(env: NodeJS.ProcessEnv = process.env): LocalModel | undefined {
 	const modelId = env.NANO_LOCAL_MODEL?.trim();
 	const baseUrl = env.NANO_LOCAL_BASE_URL?.trim().replace(/\/+$/, "");
 	if (!modelId || !baseUrl) return undefined;
-	return { modelId, baseUrl, apiKey: env.NANO_LOCAL_API_KEY || undefined, contextWindow: Number(env.NANO_LOCAL_CONTEXT || 32_768) };
+	return { modelId, baseUrl, apiKey: env.NANO_LOCAL_API_KEY || undefined, contextWindow: Number(env.NANO_LOCAL_CONTEXT || DEFAULT_LOCAL_CONTEXT) };
 }
 
 function list(value: string | undefined): string[] {
@@ -85,7 +96,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
 	const appDir = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 	const dataDir = resolve(env.NANO_DATA_DIR ?? join(appDir, "data"));
 	const channel = env.NANO_CHANNEL === "stdin" ? "stdin" : "photon";
-	const allowedUsers = list(env.NANO_ALLOWED_USERS ?? env.PHOTON_ALLOWED_USERS);
+	const allowedUsers = list(env.NANO_ALLOWED_USERS);
 	const [modelProvider, ...rest] = (env.NANO_MODEL ?? "openrouter/deepseek/deepseek-v4.1-flash").split("/");
 	const thinking = (env.NANO_THINKING ?? "low") as Config["thinking"];
 
@@ -94,7 +105,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
 		photonProjectId: env.PHOTON_PROJECT_ID ?? "",
 		photonProjectSecret: env.PHOTON_PROJECT_SECRET ?? "",
 		allowedUsers,
-		owner: env.NANO_OWNER ?? env.PHOTON_HOME_CHANNEL ?? allowedUsers[0] ?? "",
+		owner: env.NANO_OWNER ?? allowedUsers[0] ?? "",
 		modelProvider: modelProvider ?? "openrouter",
 		modelId: rest.join("/"),
 		thinking,

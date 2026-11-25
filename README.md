@@ -92,7 +92,7 @@ A pack adds one capability. List the ones you want in `NANO_PACKS` (for example 
 | `speech` | Voice memo transcription and spoken replies. Needs `vault`. [Setup](packs/speech/README.md) |
 | `t3code` | Hands coding work to a T3 Code server. Needs `mcp`. [Setup](packs/t3code/README.md) |
 | `agentmail` | Hands AgentMail inbox events to Nano; adapts an existing monitor. [Setup](packs/agentmail/README.md) |
-| `webhooks` | Accepts private Ombi availability webhooks and queues Nano messages. [Setup](packs/webhooks/README.md) |
+| `webhooks` | Accepts authenticated Ombi and AgentMail webhooks for Nano. [Setup](packs/webhooks/README.md) |
 
 Your own workflows go in `data/packs/<name>/` and never leave your machine. To write a pack, see [AGENTS.md](AGENTS.md#packs).
 

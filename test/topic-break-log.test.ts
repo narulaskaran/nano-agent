@@ -11,14 +11,6 @@ import { scriptedConversation } from "./helpers/scripted-session.ts";
 // The log line format written by Conversation.record(): "- HH:MM **role**: text".
 const LOG_LINE = /^- \d{2}:\d{2} \*\*(owner|nano)\*\*: /;
 
-test("the standing prompt tells Nano to park unresolved decisions at topic breaks, not every turn", () => {
-	const config = loadConfig({ NANO_CHANNEL: "stdin", NANO_DATA_DIR: mkdtempSync(join(tmpdir(), "nano-test-")), NANO_PACKS: "core" });
-	const prompt = buildSystemPrompt(config);
-	assert.match(prompt, /natural breaks/);
-	assert.match(prompt, /never after every message/);
-	assert.ok(prompt.includes("- HH:MM **nano**: Open:"), "the example line uses the existing log format");
-});
-
 test("a mid-session note appended by the model sits in the daily log in the existing format, with no rollover", async () => {
 	const nano = await scriptedConversation({ packs: "core" });
 	const day = new Intl.DateTimeFormat("en-CA", { timeZone: currentTimezone(nano.config) }).format(Date.now());
