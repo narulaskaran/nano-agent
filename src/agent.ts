@@ -529,10 +529,13 @@ export class Conversation {
 			if (event.type !== "message_end" || event.message.role !== "assistant") return;
 			// A cancelled reply is never sent, not even the part already written.
 			if (event.message.stopReason === "aborted") return;
-			const hasToolCall = event.message.content.some((c) => c.type === "toolCall");
+			const toolCalls = event.message.content.filter((c) => c.type === "toolCall");
+			const hasToolCall = toolCalls.length > 0;
 			if (run) run.phase = hasToolCall ? "tools" : "done";
 			// Owner turns stream each assistant message. A system turn waits for agent_end.
 			if (run?.from === "system") return;
+			// `delegate` returns immediately and the model replies right after; sending text here causes a duplicate ack.
+			if (hasToolCall && toolCalls.every((c) => c.name === "delegate")) return;
 			const { text, error } = assistantText(event.message);
 			this.sayAssistant(text, error);
 		});

@@ -37,7 +37,7 @@ export function taskTools(config: Config, tasks: TaskManager, spaceId: string): 
 				const note = choice.note ? ` ${choice.note}` : "";
 				return text(
 					`Started background task ${task.id}.${waiting}${note} The result will arrive here as a message. ` +
-						"If you have not yet told the owner you are on it, do so in one short line; otherwise write nothing more now. Do not mention the task id.",
+						"Tell the owner in one short line that you are on it. Do not mention the task id.",
 				);
 			},
 		});
