@@ -72,9 +72,21 @@ In Docker, mount the file read-only, for example `-v /path/to/google_token.json:
 
 A refresh token that goes unused for about six months stops working. The skill has the agent schedule a weekly `script` job running `google auth check --quiet`. That command always uses the refresh token and makes one cheap call (the Gmail profile, or the calendar list). It prints nothing on success, and one line on failure. It exits 0 either way, so the scheduler delivers that line as is. A non-zero exit would count as a broken check and go to a repair attempt first, and an expired Google token needs the owner, not a repair.
 
+## Inbox watch
+
+`google gmail watch` is for a `script` job with `then: "task"` (the gmail skill sets it up, every 10 minutes). Each run:
+
+1. Lists inbox mail since the last run (with a two-hour overlap) and skips ids it has seen and the owner's own messages.
+2. Asks the decision model two choice questions per email (logged to `decisions.jsonl`, never the input). The model sees only the headers, the Gmail snippet, the category, whether the owner has emailed the sender, whether the owner wrote in the thread, how the thread was handled before, and the owner's rules.
+   - `handle`: `tell`, `act`, `remember` or `ignore`.
+   - `matter`: which ongoing matter it belongs to, from the `- [Title](note.md) — summary` lines in `<kb>/<folder>/index.md` for the folders `projects, travel, finance, home, health` (`--matters` to change them), or `none`.
+3. Drops emails called `ignore` with probability 0.8 or more. It prints the rest for the agent: id, thread, suggestion, matter and context, with the email text in untrusted-content markers. It prints nothing when nothing is left, so the agent does not run.
+
+State is `$NANO_DATA_DIR/google/watch.json` (seen ids, handled threads, known senders). Rules are `$NANO_DATA_DIR/google/watch-rules.md`, plain lines the agent keeps from the owner's feedback. The KB is `$NANO_KB_DIR` or `--kb`. The first run only marks the current inbox seen. A failed decision hands the email over as `undecided`, and a missing decision model fails the job without advancing state. At most 40 new emails are checked per run (`--max`), and at most 15 are printed.
+
 ## Scripts and a local model
 
-Bulk inbox triage can stay off cloud models with `nano-local`. This pack does not do triage, but its output is meant to be piped:
+Bulk inbox triage can stay off cloud models with `nano-local`. For your own triage, the output is meant to be piped:
 
 - `google gmail search '<query>' --format ids --max 500` prints one id per line on stdout. The next-page hint goes to stderr.
 - `google gmail read - --format json` reads ids from stdin (at most 50 per call; use `xargs -n 50` for more) and prints one JSON object per message: `id, threadId, flags, from, to, cc, date, subject, attachments, unsubscribe, body`. Bodies are capped by `--max-chars`.
@@ -87,4 +99,4 @@ Only the job's final summary reaches the conversation, so message bodies never e
 
 ## Tests
 
-`npm test` from the repository root, or `node --test packs/google/test/*.test.ts`. The tests run the CLI in-process with a fake `fetch` and a temporary data dir, so they need no network. Typecheck with `npx tsc --noEmit -p packs/google`.
+`npm test` from the repository root, or `node --test packs/google/test/*.test.ts`. The tests run the CLI in-process with a fake `fetch` and a temporary data dir, so they need no network. Typecheck with `npm run typecheck`.

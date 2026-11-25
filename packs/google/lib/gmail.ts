@@ -138,7 +138,7 @@ function flags(labelIds: string[] = [], names: Map<string, string>): string[] {
 	return out;
 }
 
-const messageDate = (ctx: Ctx, m: Message) => (m.internalDate ? fmtDateTime(Number(m.internalDate), ctx.tz) : header(m.payload, "Date"));
+export const messageDate = (ctx: Ctx, m: Message) => (m.internalDate ? fmtDateTime(Number(m.internalDate), ctx.tz) : header(m.payload, "Date"));
 
 // --- search ------------------------------------------------------------------
 
@@ -383,7 +383,7 @@ function splitAddresses(list: string): string[] {
 	return (list.match(/(?:"[^"]*"|[^,])+/g) ?? []).map((a) => a.trim()).filter(Boolean);
 }
 
-function emailOf(address: string): string {
+export function emailOf(address: string): string {
 	return (/<([^>]+)>/.exec(address)?.[1] ?? address).trim().toLowerCase();
 }
 
