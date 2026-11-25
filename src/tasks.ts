@@ -8,7 +8,7 @@ import type { ModelRole } from "./models.ts";
  * is passed in (see worker.ts), which keeps queueing, limits and hand-back testable.
  */
 
-export type TaskStatus = "queued" | "running" | "done" | "failed" | "cancelled" | "lost";
+type TaskStatus = "queued" | "running" | "done" | "failed" | "cancelled" | "lost";
 
 export interface TaskSpec {
 	title: string;
@@ -53,7 +53,7 @@ export interface Task extends TaskSpec {
 
 export type TaskRunner = (task: Task, signal: AbortSignal, update: (fields: Pick<Task, "sessionFile" | "model">) => void) => Promise<TaskResult>;
 
-export interface TaskManagerOptions {
+interface TaskManagerOptions {
 	/** JSON file that survives restarts. */
 	path: string;
 	maxConcurrent: number;
@@ -63,7 +63,6 @@ export interface TaskManagerOptions {
 	handBack: (spaceId: string, prompt: string) => Promise<void>;
 	/** Called when a scheduled job's background run (jobId) or its repair (repairOf) ends. */
 	onJobRunEnded?: (task: Task) => void;
-	now?: () => number;
 }
 
 const KEEP_FINISHED = 50;
@@ -103,7 +102,7 @@ export function handBackPrompt(task: Task): string | undefined {
 	return undefined;
 }
 
-export function lostPrompt(tasks: Task[]): string {
+function lostPrompt(tasks: Task[]): string {
 	const lines = tasks.map((t) => `- ${t.id} "${t.title}"${t.source === "schedule" ? " (scheduled job)" : ""}`);
 	return `These background tasks were interrupted by a restart and did not finish:\n${lines.join("\n")}\nTell the owner briefly, and offer to rerun the ones that still matter.`;
 }
@@ -119,19 +118,17 @@ export class TaskManager {
 	private tasks: Task[] = [];
 	private readonly controllers = new Map<string, AbortController>();
 	private readonly options: TaskManagerOptions;
-	private readonly now: () => number;
 	private stopping = false;
 
 	constructor(options: TaskManagerOptions) {
 		this.options = options;
-		this.now = options.now ?? Date.now;
 		const stored = readJsonFile<{ tasks?: Task[] } | null>(options.path, null);
 		if (Array.isArray(stored?.tasks)) this.tasks = stored.tasks;
 		// Anything that was queued or running belonged to a previous process and is gone.
 		for (const task of this.tasks) {
 			if (task.status === "queued" || task.status === "running") {
 				task.status = "lost";
-				task.endedAt = this.now();
+				task.endedAt = Date.now();
 			}
 		}
 		this.save();
@@ -152,7 +149,7 @@ export class TaskManager {
 	start(spec: TaskSpec): Task {
 		let id = randomBytes(2).toString("hex");
 		while (this.get(id)) id = randomBytes(2).toString("hex");
-		const task: Task = { ...spec, id, status: "queued", createdAt: this.now() };
+		const task: Task = { ...spec, id, status: "queued", createdAt: Date.now() };
 		this.tasks.push(task);
 		this.save();
 		this.pump();
@@ -165,7 +162,7 @@ export class TaskManager {
 		if (!task) return undefined;
 		if (task.status === "queued") {
 			task.status = "cancelled";
-			task.endedAt = this.now();
+			task.endedAt = Date.now();
 			this.save();
 		} else if (task.status === "running") {
 			this.controllers.get(id)?.abort("cancelled");
@@ -207,7 +204,7 @@ export class TaskManager {
 		const controller = new AbortController();
 		this.controllers.set(task.id, controller);
 		task.status = "running";
-		task.startedAt = this.now();
+		task.startedAt = Date.now();
 		this.save();
 		const timer = setTimeout(() => controller.abort("timeout"), this.options.timeoutMs);
 		timer.unref();
@@ -238,7 +235,7 @@ export class TaskManager {
 	}
 
 	private finish(task: Task, status: TaskStatus, fields: Partial<Task>): void {
-		Object.assign(task, fields, { status, endedAt: this.now() });
+		Object.assign(task, fields, { status, endedAt: Date.now() });
 		this.save();
 		console.error(`nano: task ${task.id} (${task.title}) ${status}${task.error ? `: ${task.error}` : ""}`);
 		if (task.repairOf && status === "done") console.error(`nano: repair of job ${task.repairOf}: ${(task.result ?? "").replace(/\s+/g, " ").slice(0, 300)}`);

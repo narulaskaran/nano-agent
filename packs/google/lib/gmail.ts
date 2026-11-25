@@ -24,7 +24,7 @@ interface Header {
 	value: string;
 }
 
-export interface Part {
+interface Part {
 	partId?: string;
 	mimeType?: string;
 	filename?: string;
@@ -379,11 +379,11 @@ const MIME_TYPES: Record<string, string> = {
 const clean = (value: string) => value.replace(/[\r\n]+/g, " ").trim();
 const encodeWord = (value: string) => (/^[\x20-\x7e]*$/.test(value) ? value : `=?UTF-8?B?${Buffer.from(value).toString("base64")}?=`);
 
-export function splitAddresses(list: string): string[] {
+function splitAddresses(list: string): string[] {
 	return (list.match(/(?:"[^"]*"|[^,])+/g) ?? []).map((a) => a.trim()).filter(Boolean);
 }
 
-export function emailOf(address: string): string {
+function emailOf(address: string): string {
 	return (/<([^>]+)>/.exec(address)?.[1] ?? address).trim().toLowerCase();
 }
 
@@ -400,7 +400,7 @@ function encodeAddresses(list: string): string {
 
 const base64Lines = (data: Buffer) => (data.toString("base64").match(/.{1,76}/g) ?? []).join("\r\n");
 
-export interface Draft {
+interface Draft {
 	to: string;
 	cc?: string;
 	bcc?: string;

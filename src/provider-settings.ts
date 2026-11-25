@@ -1,7 +1,7 @@
 import type { Model } from "@earendil-works/pi-ai";
 import { streamSimple } from "@earendil-works/pi-ai/api/openai-completions";
 import type { ModelRuntime } from "@earendil-works/pi-coding-agent";
-import { type Config, MAX_OUTPUT_TOKENS } from "./config.ts";
+import { type Config, DEFAULT_LOCAL_CONTEXT, MAX_OUTPUT_TOKENS, vaultLocalModel } from "./config.ts";
 import { providerFetch, providerSettingsAvailable, roleFetch } from "./provider-client.ts";
 
 interface Route {
@@ -58,7 +58,7 @@ export function applyProviderSettings(config: Config, runtime: ModelRuntime, set
 		if (!connection?.capabilities.includes("chat") || (role === "local" && !connection.local))
 			throw new Error("Invalid provider role settings");
 		const provider = `nano-vault-${role}`;
-		const contextWindow = route.contextWindow || 32768;
+		const contextWindow = route.contextWindow || DEFAULT_LOCAL_CONTEXT;
 		const source = connection.catalogProvider ? runtime.getModel(connection.catalogProvider, route.model) : undefined;
 		runtime.registerProvider(provider, {
 			name: `Owner configured ${role}`,
@@ -88,14 +88,7 @@ export function applyProviderSettings(config: Config, runtime: ModelRuntime, set
 	}
 	[config.modelProvider, config.modelId] = settings.roles.main ? ["nano-vault-main", settings.roles.main.model] : state.main;
 	config.background = roles.background ? { provider: "nano-vault-background", modelId: roles.background.model } : undefined;
-	config.local = settings.roles.local
-		? {
-				modelId: settings.roles.local.model,
-				baseUrl: "http://nano-vault/local",
-				contextWindow: settings.roles.local.contextWindow || 32768,
-				vault: true,
-			}
-		: state.local;
+	config.local = settings.roles.local ? vaultLocalModel(settings.roles.local) : state.local;
 	config.providerRevision = signature;
 	state.signature = signature;
 }

@@ -4,9 +4,7 @@ import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { buildQuestion, confident, createDecider, decide, DecisionError, decisionLogPath, decisionTransport, type DecisionRequest, LOG_MAX_BYTES, top, type Transport } from "../src/decide.ts";
-import { logGate } from "../src/gate.ts";
-import { logRoute } from "../src/router.ts";
+import { buildQuestion, confident, createDecider, decide, DecisionError, decisionLogPath, decisionTransport, type DecisionRequest, LOG_MAX_BYTES, logDecisionEvent, top, type Transport } from "../src/decide.ts";
 
 const request: DecisionRequest = {
 	state: "NAV Fund Services: we have received your updated ACH instructions.",
@@ -158,7 +156,6 @@ test("decide reports each failure reason from what it observed", async () => {
 	let calls = 0;
 	const decider = createDecider({
 		dataDir,
-		refusePrivate: true,
 		transport: async () => {
 			calls++;
 			return { status: 200, text: JSON.stringify({ model: "m", answers: { confirmed: { type: "choice", choice: "yes", probabilities: { yes: 1 } } } }) };
@@ -185,21 +182,21 @@ test("confident takes a number or a per-label minimum", () => {
 test("router and gate logs rotate at the same cap as the decisions log", () => {
 	assert.equal(LOG_MAX_BYTES, 5 * 1024 * 1024);
 	const dir = mkdtempSync(join(tmpdir(), "nano-logs-"));
-	for (const [name, write] of [
-		["router.jsonl", (path: string) => logRoute(path, { n: 1 })],
-		["gate.jsonl", (path: string) => logGate(path, { n: 1 })],
+	for (const [name, what] of [
+		["router.jsonl", "router"],
+		["gate.jsonl", "gate"],
 	] as const) {
 		const path = join(dir, name);
 		writeFileSync(path, "x".repeat(LOG_MAX_BYTES + 1));
-		write(path);
+		logDecisionEvent(path, what, { n: 1 });
 		assert.equal(readFileSync(`${path}.1`, "utf8").length, LOG_MAX_BYTES + 1);
 		const fresh = readFileSync(path, "utf8");
 		assert.match(fresh, /"n":1/);
 		assert.ok(fresh.length < 500);
 	}
 	const small = join(dir, "small.jsonl");
-	logRoute(small, { n: 1 });
-	logRoute(small, { n: 2 });
+	logDecisionEvent(small, "router", { n: 1 });
+	logDecisionEvent(small, "router", { n: 2 });
 	assert.equal(existsSync(`${small}.1`), false);
 	assert.equal(readFileSync(small, "utf8").trim().split("\n").length, 2);
 });

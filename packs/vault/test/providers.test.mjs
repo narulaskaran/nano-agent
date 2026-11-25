@@ -15,7 +15,7 @@ import {
 	deleteProvider,
 	testProvider,
 } from "../lib/providers.mjs";
-import { renderTemplate, anthropicRequest, anthropicResponse, completionResponse } from "../lib/provider-shapes.mjs";
+import { anthropicRequest, anthropicResponse, completionResponse } from "../lib/provider-shapes.mjs";
 import { emptyStore, upsertLogin, saveStore, loadStore } from "../lib/store.mjs";
 import { handleProviderApi, scrubProviderText } from "../lib/provider-api.mjs";
 import { roleFetch } from "../../../src/provider-client.ts";
@@ -165,33 +165,6 @@ test("Anthropic conversion preserves system prompts, tools, results, images and 
 	assert.equal(path, "/messages");
 	assert.match(response.body.toString(), /tool_calls/);
 	assert.match(response.body.toString(), /\[DONE\]/);
-});
-test("custom templates retain JSON types and cannot execute code or reference secrets", async () => {
-	assert.deepEqual(renderTemplate({ messages: "{{messages}}", prompt: "Hi {{text}}" }, { messages: [{ role: "user" }], text: "there" }), {
-		messages: [{ role: "user" }],
-		prompt: "Hi there",
-	});
-	assert.throws(() => renderTemplate("{{api_key}}", {}), /Unknown/);
-	const custom = {
-		healthPath: "/health",
-		chat: { path: "/generate", request: { model: "{{model}}", conversation: "{{messages}}" }, response: { text: "result.answer" } },
-	};
-	let data = configured({ format: "custom", custom: JSON.stringify(custom) });
-	const response = await runRole(
-		data,
-		"main",
-		{ messages: [{ role: "user", content: "hello" }], stream: false },
-		async (_p, path, opts) => {
-			assert.equal(path, "/generate");
-			assert.equal(JSON.parse(opts.body).conversation[0].content, "hello");
-			return ok({ result: { answer: "custom answer" } });
-		},
-	);
-	assert.equal(JSON.parse(response.body).choices[0].message.content, "custom answer");
-	assert.throws(
-		() => configured({ format: "custom", custom: '{"chat":{"path":"//evil.example","request":{},"response":{"text":"x"}}}' }),
-		/path/,
-	);
 });
 test("speech adapters send raw WAV to Bark, multipart to compatible STT and voice to compatible TTS", async () => {
 	let data = saveProvider(

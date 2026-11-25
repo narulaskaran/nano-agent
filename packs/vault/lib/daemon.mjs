@@ -2,11 +2,11 @@
 // store and the portal. Nothing returned on the socket contains a secret.
 
 import { chmodSync, existsSync, mkdirSync, rmSync, statSync } from "node:fs";
-import http from "node:http";
 import { networkInterfaces } from "node:os";
 import { dirname, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createBrowserHost, redact } from "../../purchases/lib/browser.mjs";
+import { createJsonSocketServer } from "./client.mjs";
 import { authorizedFetch, httpsTransport, parseFetchArgs } from "./fetch.mjs";
 import { fillLogin } from "./login.mjs";
 import { normalizeIp, parseAllow } from "./net.mjs";
@@ -19,7 +19,6 @@ import { collectSecrets } from "./secrets.mjs";
 import { assertVaultDir, deleteEntry, getEntry, isMountPoint, loadStore, publicEntry, saveStore, upsertKey, upsertLogin } from "./store.mjs";
 
 const SELF = fileURLToPath(import.meta.url);
-const MAX_REQUEST = 2_000_000;
 
 function enabled(name) {
 	const value = process.env[name];
@@ -149,29 +148,12 @@ function main() {
 		host.on("error", (error) => console.error(`nano-vault: portal failed (${error.code ?? "error"})`));
 	}
 
-	const socket = http.createServer((req, res) => {
-		if (req.url?.startsWith("/providers/")) {
+	const socket = createJsonSocketServer(answer, {
+		onRequest(req, res) {
+			if (!req.url?.startsWith("/providers/")) return false;
 			void handleProviderApi(req, res, { read: () => data, scrub });
-			return;
-		}
-		const chunks = [];
-		let size = 0;
-		req.on("data", (chunk) => {
-			size += chunk.length;
-			if (size > MAX_REQUEST) req.destroy();
-			else chunks.push(chunk);
-		});
-		req.on("end", () => {
-			void answer(Buffer.concat(chunks).toString("utf8"))
-				.then((reply) => {
-					if (res.writableEnded) return;
-					res.writeHead(200, { "content-type": "application/json" });
-					res.end(JSON.stringify(reply));
-				})
-				.catch(() => {
-					if (!res.writableEnded) res.end();
-				});
-		});
+			return true;
+		},
 	});
 
 	// One browser command at a time. Without this a second command could move the

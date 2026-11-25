@@ -5,7 +5,7 @@ import { refreshProviderSettings } from "./provider-settings.ts";
 import { type Config, type LocalModel, MAX_OUTPUT_TOKENS } from "./config.ts";
 
 /** Pi provider id under which `NANO_LOCAL_*` is registered. */
-export const LOCAL_PROVIDER = "nano-local";
+const LOCAL_PROVIDER = "nano-local";
 
 /** The provider id the local model is registered under: the vault's role provider (provider-settings.ts) or our own. */
 export function localProviderId(local: LocalModel): string {
@@ -30,7 +30,7 @@ export function withProviderOrder(config: Config, model: Model<Api>): Model<Api>
 }
 
 /** The model with its reply ceiling lowered to MAX_OUTPUT_TOKENS. */
-export function capOutput(model: Model<Api>): Model<Api> {
+function capOutput(model: Model<Api>): Model<Api> {
 	return model.maxTokens > MAX_OUTPUT_TOKENS ? { ...model, maxTokens: MAX_OUTPUT_TOKENS } : model;
 }
 

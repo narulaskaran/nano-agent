@@ -10,9 +10,9 @@ export function ip4(a, b, c, d) {
 }
 
 /** Tailscale's IPv4 range: the RFC 6598 shared block, 10-bit prefix. */
-export const TAILSCALE = { base: ip4(100, 64, 0, 0), bits: 10 };
+const TAILSCALE = { base: ip4(100, 64, 0, 0), bits: 10 };
 
-export function ipv4ToInt(ip) {
+function ipv4ToInt(ip) {
 	const parts = String(ip).split(".");
 	if (parts.length !== 4) return null;
 	let value = 0;
@@ -25,7 +25,7 @@ export function ipv4ToInt(ip) {
 	return value;
 }
 
-export function inCidr(ip, base, bits) {
+function inCidr(ip, base, bits) {
 	const address = ipv4ToInt(ip);
 	const network = ipv4ToInt(base);
 	if (address === null || network === null) return false;
@@ -50,12 +50,12 @@ export function isLoopback(ip) {
 	return inCidr(value, ip4(127, 0, 0, 0), 8);
 }
 
-export function isUnspecified(ip) {
+function isUnspecified(ip) {
 	const value = normalizeIp(ip);
 	return value === ip4(0, 0, 0, 0) || value === "::";
 }
 
-export function isLinkLocal(ip) {
+function isLinkLocal(ip) {
 	const value = normalizeIp(ip);
 	if (inCidr(value, ip4(169, 254, 0, 0), 16)) return true;
 	const parts = expandIpv6(value);
@@ -90,7 +90,7 @@ export function isRestricted(ip) {
 	return false;
 }
 
-export function sameAddress(a, b) {
+function sameAddress(a, b) {
 	return normalizeIp(a) === normalizeIp(b);
 }
 

@@ -1,18 +1,11 @@
 import { execFileSync } from "node:child_process";
-import { readFileSync, writeFileSync, mkdtempSync, mkdirSync, rmSync, readdirSync, existsSync } from "node:fs";
+import { readFileSync, writeFileSync, mkdtempSync, mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { providerFetch } from "../../../src/provider-client.ts";
 
 function ffmpeg(): string {
-	if (process.env.NANO_FFMPEG) return process.env.NANO_FFMPEG;
-	// Compatibility with existing owner-installed speech scripts.
-	const asr = join(process.env.NANO_DATA_DIR || "/data", "workspace", "asr");
-	if (existsSync(asr)) {
-		const dir = readdirSync(asr).find((name) => name.startsWith("ffmpeg-") && existsSync(join(asr, name, "ffmpeg")));
-		if (dir) return join(asr, dir, "ffmpeg");
-	}
-	return "ffmpeg";
+	return process.env.NANO_FFMPEG || "ffmpeg";
 }
 async function main(): Promise<void> {
 	const [command, input, output] = process.argv.slice(2);

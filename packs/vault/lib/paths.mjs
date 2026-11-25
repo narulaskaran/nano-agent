@@ -2,8 +2,6 @@
 // socket path. The client ignores its own environment so it cannot point itself
 // at a socket it created. Keep the uid in install.sh and start-root.sh in sync.
 
-export const VAULT_UID = 10001;
-export const VAULT_GID = 10001;
 export const VAULT_RUN_DIR = "/run/nano-vault";
 // Keep in sync with PROVIDER_SOCKET in src/provider-client.ts.
 export const VAULT_SOCKET = "/run/nano-vault/vault.sock";

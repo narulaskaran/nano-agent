@@ -33,7 +33,7 @@ interface Attendee {
 	organizer?: boolean;
 }
 
-export interface CalendarEvent {
+interface CalendarEvent {
 	id: string;
 	status?: string;
 	summary?: string;
@@ -65,7 +65,7 @@ const calPath = (id: string) => `${CALENDAR}/calendars/${encodeURIComponent(id)}
 const sendUpdatesOpt = (value: string | undefined) => choice(value, ["none", "all", "externalOnly"] as const, "none");
 const dayLabel = (date: string) => fmtDay(Date.parse(`${date}T12:00:00Z`), "UTC");
 
-export function addDaysToDate(date: string, days: number): string {
+function addDaysToDate(date: string, days: number): string {
 	const [y, m, d] = date.split("-").map(Number) as [number, number, number];
 	return new Date(Date.UTC(y, m - 1, d + days)).toISOString().slice(0, 10);
 }

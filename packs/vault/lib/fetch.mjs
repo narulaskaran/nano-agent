@@ -14,7 +14,17 @@ const MAX_BODY = 200_000;
 const REDIRECTS = new Set([301, 302, 303, 307, 308]);
 // A supplied Host would send the key to another site behind the same CDN address.
 // The rest change how the request is framed or routed.
-const FORBIDDEN_HEADERS = new Set(["host", "connection", "content-length", "transfer-encoding", "upgrade", "proxy-authorization", "te", "trailer", "keep-alive"]);
+export const FORBIDDEN_HEADERS = new Set(["host", "connection", "content-length", "transfer-encoding", "upgrade", "proxy-authorization", "te", "trailer", "keep-alive"]);
+
+/** Node `http`/`https` lookup callback pinned to one resolved IP address. */
+export function pinnedLookup(address) {
+	return (_hostname, opts, callback) => {
+		const done = typeof opts === "function" ? opts : callback;
+		const family = isIP(address);
+		if (typeof opts === "object" && opts?.all) done(null, [{ address, family }]);
+		else done(null, address, family);
+	};
+}
 
 export function parseFetchArgs(argv) {
 	let method;
@@ -78,7 +88,7 @@ export async function authorizedFetch({ entry, url, method, headers, body, resol
 	throw new Error("too many redirects");
 }
 
-export function formatResponse(response, secrets) {
+function formatResponse(response, secrets) {
 	const lines = [`HTTP ${response.status}`];
 	for (const name of ["content-type", "content-length"]) {
 		const value = headerValue(response.headers, name);
@@ -102,12 +112,7 @@ export function httpsTransport({ rejectUnauthorized = true } = {}) {
 					path: `${url.pathname}${url.search}`,
 					headers,
 					rejectUnauthorized,
-					lookup: (_hostname, opts, callback) => {
-						const done = typeof opts === "function" ? opts : callback;
-						const family = isIP(address);
-						if (typeof opts === "object" && opts?.all) done(null, [{ address, family }]);
-						else done(null, address, family);
-					},
+					lookup: pinnedLookup(address),
 				},
 				(res) => {
 					const chunks = [];

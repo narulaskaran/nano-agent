@@ -57,7 +57,7 @@ async function main(): Promise<number> {
 	const appDir = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 	const dataDir = resolve(process.env.NANO_DATA_DIR ?? join(appDir, "data"));
 	const source = values.source ?? (process.env.NANO_DECIDE_SOURCE || undefined);
-	const response = await createDecider({ dataDir, refusePrivate: true }).decide(request, { source }).catch((error: unknown) => {
+	const response = await createDecider({ dataDir }).decide(request, { source }).catch((error: unknown) => {
 		if (error instanceof DecisionError && error.reason === "unconfigured") {
 			console.error(`nano-decide: ${error.message}`);
 			process.exit(2);

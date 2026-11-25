@@ -35,7 +35,7 @@ export function baseMessageId(id: string): string {
 	return id.replace(/^p:\d+\//, "");
 }
 
-export interface SendFileOptions {
+interface SendFileOptions {
 	/** undefined: voice memo for audio files, attachment otherwise. true: voice memo only. false: plain attachment. */
 	asVoice?: boolean;
 }

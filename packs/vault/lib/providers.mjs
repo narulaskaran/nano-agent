@@ -1,21 +1,12 @@
 // Owner-managed connections and capability routes. Secrets never leave the daemon.
 import { collectSecrets } from "./secrets.mjs";
-import {
-	normalizeCustom,
-	anthropicRequest,
-	anthropicResponse,
-	completion,
-	completionResponse,
-	customRequest,
-	customVariables,
-	jsonField,
-} from "./provider-shapes.mjs";
+import { anthropicRequest, anthropicResponse, completionResponse } from "./provider-shapes.mjs";
 import http from "node:http";
 import https from "node:https";
 import { isIP } from "node:net";
 import { checkName } from "./policy.mjs";
 import { isLoopback, isPrivate, isRestricted } from "./net.mjs";
-import { resolveHost } from "./fetch.mjs";
+import { FORBIDDEN_HEADERS, pinnedLookup, resolveHost } from "./fetch.mjs";
 
 export const ROLES = {
 	main: "Main conversation",
@@ -30,7 +21,6 @@ export const DECIDE_MODEL = "typesafe/jev-1.14";
 export const FORMATS = {
 	openai: "OpenAI-compatible",
 	anthropic: "Anthropic Messages",
-	custom: "Custom request / response mapping",
 	bark: "Bark (raw WAV)",
 	woof: "Woof (plain text)",
 };
@@ -68,7 +58,7 @@ export function publicProvider(p) {
 export function providerSecrets(data) {
 	return collectSecrets((data.providers ?? []).map((p) => ({ kind: "api-key", key: p.key })));
 }
-export function normalizeBase(raw, local) {
+function normalizeBase(raw, local) {
 	let url;
 	try {
 		url = new URL(String(raw).trim());
@@ -110,16 +100,10 @@ export function saveProvider(data, form) {
 	const sameDestination = previous?.baseUrl === baseUrl;
 	const key = form.removeKey === "yes" ? "" : supplied || (sameDestination ? previous?.key : "") || "";
 	const authHeader = String(form.authHeader || (format === "anthropic" ? "x-api-key" : "Authorization")).trim();
-	if (
-		!/^[A-Za-z0-9-]{1,64}$/.test(authHeader) ||
-		["host", "connection", "content-length", "transfer-encoding", "upgrade", "proxy-authorization", "te", "trailer", "keep-alive"].includes(
-			authHeader.toLowerCase(),
-		)
-	)
+	if (!/^[A-Za-z0-9-]{1,64}$/.test(authHeader) || FORBIDDEN_HEADERS.has(authHeader.toLowerCase()))
 		throw new Error("Choose a valid authentication header.");
 	const authPrefix = form.authPrefix ?? (format === "anthropic" ? "" : "Bearer ");
 	if (String(authPrefix).length > 100 || /[\r\n]/.test(authPrefix)) throw new Error("Invalid authentication prefix.");
-	const custom = format === "custom" ? normalizeCustom(form.custom, capabilities) : null;
 	const provider = {
 		id,
 		name,
@@ -130,7 +114,6 @@ export function saveProvider(data, form) {
 		key,
 		authHeader,
 		authPrefix,
-		custom,
 		...(sameDestination && previous?.catalog ? { catalog: previous.catalog } : {}),
 	};
 	const next = { ...data, providers: [...(data.providers ?? []).filter((p) => p.id !== id), provider] };
@@ -170,7 +153,7 @@ export function saveRoles(data, form) {
 	validateRoutes(next);
 	return next;
 }
-export function validateRoutes(data) {
+function validateRoutes(data) {
 	for (const [role, route] of Object.entries(data.roles ?? {})) {
 		for (const r of [route, route.fallback].filter(Boolean)) {
 			const p = (data.providers ?? []).find((p) => p.id === r.provider);
@@ -188,7 +171,7 @@ export function validateRoutes(data) {
 		}
 	}
 }
-export function roleRoute(data, role) {
+function roleRoute(data, role) {
 	if (!Object.hasOwn(ROLES, role)) throw new Error("Unknown job.");
 	const route = data.roles?.[role] ?? (role === "background" ? data.roles?.main : role === "decide" ? defaultDecideRoute(data) : null);
 	if (!route) return null;
@@ -238,11 +221,7 @@ export async function providerRequest(provider, path, { method = "GET", body, co
 				headers,
 				signal,
 				timeout: 120000,
-				lookup: (_name, opts, cb) => {
-					const result = { address: addresses[0], family: isIP(addresses[0]) };
-					if (opts?.all) cb(null, [result]);
-					else cb(null, result.address, result.family);
-				},
+				lookup: pinnedLookup(addresses[0]),
 			},
 			(res) => {
 				const chunks = [];
@@ -271,7 +250,7 @@ export async function providerRequest(provider, path, { method = "GET", body, co
 export async function testProvider(provider, request = providerRequest) {
 	const result = await request(
 		provider,
-		["openai", "anthropic"].includes(provider.format) ? "/models" : provider.custom?.healthPath || "/health",
+		["openai", "anthropic"].includes(provider.format) ? "/models" : "/health",
 	);
 	if (result.status < 200 || result.status >= 300)
 		throw new Error(`Connection test failed: HTTP ${result.status}. Check the base URL and API key.`);
@@ -333,29 +312,6 @@ export async function runRole(data, role, payload, request = providerRequest, { 
 					...(isOpenRouter(provider) ? { provider: OPENROUTER_ZDR } : {}),
 				}),
 			});
-		}
-		if (provider.format === "custom") {
-			const shape = provider.custom[capability(role)];
-			const response = await customRequest(provider, shape, customVariables(payload, r), send);
-			if (response.status < 200 || response.status >= 300) return response;
-			if (role === "tts" && !shape.response?.audio) return response;
-			let parsed;
-			try {
-				parsed = JSON.parse(response.body);
-			} catch {
-				throw new Error("Custom API returned invalid JSON.");
-			}
-			if (role === "tts") {
-				const audio = jsonField(parsed, shape.response.audio);
-				if (typeof audio !== "string" || !audio) throw new Error("Custom audio response field is missing.");
-				return { status: 200, contentType: "audio/wav", body: Buffer.from(audio, "base64") };
-			}
-			const text = jsonField(parsed, shape.response.text);
-			const tools = shape.response.toolCalls ? jsonField(parsed, shape.response.toolCalls) : [];
-			if (tools != null && !Array.isArray(tools)) throw new Error("Custom toolCalls field must be an array.");
-			if (typeof text !== "string" && !tools?.length) throw new Error("Custom response text field is missing.");
-			if (role === "stt") return { status: 200, contentType: "application/json", body: Buffer.from(JSON.stringify({ text })) };
-			return completionResponse(completion(r.model, text, tools), payload.stream);
 		}
 		if (capability(role) === "chat") {
 			const { api_key, apiKey, base_url, baseUrl, ...input } = payload;

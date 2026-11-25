@@ -4,13 +4,13 @@ import type { AgentSession, ModelRuntime } from "@earendil-works/pi-coding-agent
 import { Type } from "typebox";
 import { baseMessageId, type Channel, clip, type Inbound, type Revision } from "./channel.ts";
 import { type Config, currentTimezone, localStamp } from "./config.ts";
-import { createDecider, type Decider } from "./decide.ts";
+import { createDecider, type Decider, logDecisionEvent } from "./decide.ts";
 import { readJsonFile, writeJsonFile } from "./json-store.ts";
 import { getMainModel } from "./models.ts";
 import { refreshProviderSettings } from "./provider-settings.ts";
 import { packExtensions } from "./packs.ts";
 import { buildSystemPrompt } from "./prompt.ts";
-import { LONG_HINT, logRoute, type RecentTurn, REMEMBER_HINT, route, skillBlock, taskHint } from "./router.ts";
+import { LONG_HINT, type RecentTurn, REMEMBER_HINT, route, skillBlock, taskHint } from "./router.ts";
 import type { Scheduler } from "./scheduler.ts";
 import { assistantText, createNanoSession } from "./session.ts";
 import { listSkills } from "./skills.ts";
@@ -171,7 +171,7 @@ interface RunState {
 /** How many notes made before the session exists are kept for it. */
 const NOTE_KEEP = 5;
 
-export interface ConversationOptions {
+interface ConversationOptions {
 	/** Router decisions, used only when the router is on. Tests inject a fake. */
 	decider?: Decider;
 }
@@ -220,7 +220,7 @@ export class Conversation {
 		options: ConversationOptions = {},
 	) {
 		this.spaceId = spaceId;
-		this.decider = config.router ? (options.decider ?? createDecider({ dataDir: config.dataDir, refusePrivate: true })) : undefined;
+		this.decider = config.router ? (options.decider ?? createDecider({ dataDir: config.dataDir })) : undefined;
 		this.config = config;
 		this.channel = channel;
 		this.store = store;
@@ -371,7 +371,7 @@ export class Conversation {
 				actions.push("no-thinking");
 			}
 		}
-		logRoute(join(this.config.dataDir, "router.jsonl"), { answers: decision.answers, ms: decision.ms, actions, error: decision.error, busy: free ? undefined : true });
+		logDecisionEvent(join(this.config.dataDir, "router.jsonl"), "router", { answers: decision.answers, ms: decision.ms, actions, error: decision.error, busy: free ? undefined : true });
 		const summary = Object.entries(decision.answers).map(([id, a]) => `${id}=${a.label} ${a.p.toFixed(2)}`).join(" ");
 		console.error(`nano: routed (${decision.ms} ms) ${summary || decision.error}${actions.length ? ` -> ${actions.join(", ")}` : ""}`);
 		if (actions.includes("no-reply")) return this.noteUnanswered(work.spoken);

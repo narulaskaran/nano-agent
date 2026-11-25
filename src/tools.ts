@@ -123,7 +123,7 @@ function describeJob(job: Job, timeZone: string): string {
 }
 
 /** Health column of schedule_list, so a broken job is visible without reading logs. */
-export function describeHealth(job: Job, timeZone: string): string {
+function describeHealth(job: Job, timeZone: string): string {
 	if (job.cron) {
 		try {
 			cronMatches(job.cron, new Date(), timeZone);

@@ -51,7 +51,7 @@ async function main(): Promise<void> {
 
 	const channel: Channel = config.channel === "stdin" ? createStdinChannel() : await createPhotonChannel(config);
 	// One decider for the router, the gate and failure triage: transport, log and the private-input rule.
-	const decider = createDecider({ dataDir: config.dataDir, transport: decisionTransport(), refusePrivate: true });
+	const decider = createDecider({ dataDir: config.dataDir, transport: decisionTransport() });
 	const store = new StateStore(config.dataDir);
 	const conversations = new Map<string, Conversation>();
 	const scheduler: Scheduler = new Scheduler(config, {

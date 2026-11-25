@@ -1,57 +1,5 @@
-// JSON templates, not executable code. Chat callers always speak one canonical
-// tool-capable format; adapters translate only at the trusted provider boundary.
-const VARIABLES = new Set(["model", "messages", "system", "tools", "text", "audio_base64", "voice", "max_tokens"]);
-const DANGEROUS = new Set(["__proto__", "prototype", "constructor"]);
-export function jsonField(value, path) {
-	if (!path) return undefined;
-	return String(path)
-		.split(".")
-		.reduce((obj, key) => (!DANGEROUS.has(key) && obj != null && Object.hasOwn(Object(obj), key) ? obj[key] : undefined), value);
-}
-export function renderTemplate(template, variables) {
-	if (typeof template === "string") {
-		const exact = /^\{\{([a-z_]+)\}\}$/.exec(template);
-		if (exact) {
-			if (!VARIABLES.has(exact[1])) throw new Error("Unknown template variable.");
-			return variables[exact[1]] ?? null;
-		}
-		return template.replace(/\{\{([a-z_]+)\}\}/g, (_, name) => {
-			if (!VARIABLES.has(name)) throw new Error("Unknown template variable.");
-			const v = variables[name];
-			return typeof v === "object" ? JSON.stringify(v) : String(v ?? "");
-		});
-	}
-	if (Array.isArray(template)) return template.map((v) => renderTemplate(v, variables));
-	if (template && typeof template === "object")
-		return Object.fromEntries(
-			Object.entries(template).map(([k, v]) => {
-				if (DANGEROUS.has(k)) throw new Error("Invalid template property.");
-				return [k, renderTemplate(v, variables)];
-			}),
-		);
-	return template;
-}
-export function normalizeCustom(raw, capabilities) {
-	let custom;
-	try {
-		custom = typeof raw === "string" ? JSON.parse(raw) : raw;
-	} catch {
-		throw new Error("Custom API mapping must be valid JSON.");
-	}
-	if (!custom || typeof custom !== "object" || Array.isArray(custom)) throw new Error("Custom API mapping must be a JSON object.");
-	for (const c of capabilities) {
-		const shape = custom[c];
-		if (!shape || !validPath(shape.path) || shape.request === undefined)
-			throw new Error(`Custom ${c} mapping needs a path and request template.`);
-		if (c !== "tts" && !shape.response?.text) throw new Error(`Custom ${c} mapping needs a response.text field path.`);
-		renderTemplate(shape.request, {});
-	}
-	if (custom.healthPath && !validPath(custom.healthPath)) throw new Error("Custom health path must start with a single slash.");
-	return custom;
-}
-function validPath(path) {
-	return typeof path === "string" && path.startsWith("/") && !path.startsWith("//") && !/[\r\n#]/.test(path);
-}
+// Chat callers always speak one canonical tool-capable format; adapters translate
+// only at the trusted provider boundary.
 const textOf = (content) =>
 	typeof content === "string"
 		? content
@@ -117,7 +65,7 @@ export function anthropicRequest(input, model) {
 		stream: false,
 	};
 }
-export function completion(model, text, tools = [], usage = {}) {
+function completion(model, text, tools = [], usage = {}) {
 	return {
 		id: "nano-" + Date.now(),
 		object: "chat.completion",
@@ -164,29 +112,5 @@ export function completionResponse(value, stream) {
 		status: 200,
 		contentType: "text/event-stream",
 		body: Buffer.from(chunks.map((c) => "data: " + JSON.stringify(c) + "\n\n").join("") + "data: [DONE]\n\n"),
-	};
-}
-export async function customRequest(provider, shape, variables, request) {
-	const value = renderTemplate(shape.request, variables);
-	const response = await request(provider, shape.path, {
-		method: "POST",
-		contentType: typeof value === "string" ? "text/plain; charset=utf-8" : "application/json",
-		body: typeof value === "string" ? value : JSON.stringify(value),
-	});
-	return response;
-}
-export function customVariables(payload, route) {
-	return {
-		model: route.model,
-		messages: payload.messages ?? [],
-		system: (payload.messages ?? [])
-			.filter((m) => ["system", "developer"].includes(m.role))
-			.map((m) => textOf(m.content))
-			.join("\n"),
-		tools: payload.tools ?? [],
-		text: payload.text ?? textOf((payload.messages ?? []).filter((m) => m.role === "user").at(-1)?.content),
-		audio_base64: payload.audio ?? "",
-		voice: route.voice,
-		max_tokens: payload.max_tokens ?? payload.max_completion_tokens ?? 4096,
 	};
 }

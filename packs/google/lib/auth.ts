@@ -1,7 +1,8 @@
 import { createHash, randomBytes } from "node:crypto";
 import { existsSync, rmSync } from "node:fs";
 import { join } from "node:path";
-import { CliError, dataDir, type Io, readJson, writePrivate } from "./util.ts";
+import { writePrivateFile } from "../../../src/json-store.ts";
+import { CliError, dataDir, type Io, readJson } from "./util.ts";
 
 const SCOPE = "https://www.googleapis.com/auth/";
 
@@ -27,7 +28,7 @@ const DEFAULT_REDIRECT = "http://localhost";
 const EARLY_REFRESH_MS = 120_000;
 
 /** The google-auth "authorized user" JSON format, which Python and Node Google libraries read and write. */
-export interface AuthorizedUser {
+interface AuthorizedUser {
 	type?: string;
 	client_id?: string;
 	client_secret?: string;
@@ -81,7 +82,7 @@ interface Cache {
 }
 
 /** Accepts a Google client-secret JSON (installed or web) or an authorized-user JSON. */
-export function parseClient(json: unknown): Client | undefined {
+function parseClient(json: unknown): Client | undefined {
 	const file = (json ?? {}) as ClientFile;
 	const fields: ClientFields = file.installed ?? file.web ?? file;
 	if (!fields.client_id || !fields.client_secret) return undefined;
@@ -95,7 +96,7 @@ export function parseClient(json: unknown): Client | undefined {
 	};
 }
 
-export function scopeList(value: string[] | string | undefined): string[] | undefined {
+function scopeList(value: string[] | string | undefined): string[] | undefined {
 	if (value === undefined) return undefined;
 	const list = Array.isArray(value) ? value : value.split(/\s+/);
 	return list.filter(Boolean);
@@ -248,7 +249,7 @@ export class Auth {
 				redirect_uris: [client.redirectUri],
 			},
 		};
-		writePrivate(join(this.dir, "client_secret.json"), `${JSON.stringify(file, null, 2)}\n`);
+		writePrivateFile(join(this.dir, "client_secret.json"), `${JSON.stringify(file, null, 2)}\n`);
 		return client;
 	}
 
@@ -264,7 +265,7 @@ export class Auth {
 		const verifier = randomBytes(48).toString("base64url");
 		const state = randomBytes(16).toString("hex");
 		const pending: Pending = { state, verifier, redirectUri: client.redirectUri, scopes, createdAt: this.io.now() };
-		writePrivate(this.pendingPath, JSON.stringify(pending));
+		writePrivateFile(this.pendingPath, JSON.stringify(pending));
 		const url = new URL(client.authUri);
 		url.search = new URLSearchParams({
 			client_id: client.clientId,
@@ -319,7 +320,7 @@ export class Auth {
 			universe_domain: "googleapis.com",
 			account: "",
 		};
-		writePrivate(this.tokenPath, `${JSON.stringify(token, null, 2)}\n`);
+		writePrivateFile(this.tokenPath, `${JSON.stringify(token, null, 2)}\n`);
 		rmSync(this.pendingPath, { force: true });
 		rmSync(this.cachePath, { force: true });
 		this.rememberToken(token);
@@ -332,7 +333,7 @@ export class Auth {
 		const token = this.token();
 		if (!token) return;
 		const updated = { ...token, account };
-		writePrivate(this.tokenPath, `${JSON.stringify(updated, null, 2)}\n`);
+		writePrivateFile(this.tokenPath, `${JSON.stringify(updated, null, 2)}\n`);
 		this.rememberToken(updated);
 	}
 
@@ -412,13 +413,13 @@ export class Auth {
 			expiresAt: now + (response.expires_in ?? 3600) * 1000,
 			scope: response.scope,
 		};
-		writePrivate(this.cachePath, JSON.stringify(cache));
+		writePrivateFile(this.cachePath, JSON.stringify(cache));
 		this.cacheRaw = cache;
 		this.cacheLoaded = true;
 		this.memory = { accessToken: response.access_token, expiresAt: cache.expiresAt };
 		if (response.refresh_token && response.refresh_token !== token.refresh_token && !this.shared) {
 			const updated = { ...token, refresh_token: response.refresh_token };
-			writePrivate(this.tokenPath, `${JSON.stringify(updated, null, 2)}\n`);
+			writePrivateFile(this.tokenPath, `${JSON.stringify(updated, null, 2)}\n`);
 			this.rememberToken(updated);
 		}
 		return response.access_token;

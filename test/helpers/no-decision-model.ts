@@ -10,5 +10,5 @@ export const noDecisionModel: Transport = async () => {
 
 /** A decider that never calls a real model. Pass a scripted transport to answer decisions. */
 export function testDecider(dataDir: string, transport: Transport = noDecisionModel): Decider {
-	return createDecider({ dataDir, transport, refusePrivate: true });
+	return createDecider({ dataDir, transport });
 }
