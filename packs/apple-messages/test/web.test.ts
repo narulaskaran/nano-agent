@@ -10,7 +10,7 @@ import type { AssistantMessage, ToolCall } from "@earendil-works/pi-ai";
 import { composeWith, type Complete, type ComposeTool, ComposeToolError } from "../../../src/compose.ts";
 import { loadConfig } from "../../../src/config.ts";
 import type { Decider } from "../../../src/decide.ts";
-import appleMessages from "../service.ts";
+import appleMessages, { chatTool } from "../service.ts";
 import { publicFetch, restrictedAddress, webTools } from "../web.ts";
 
 type DecisionResponse = Awaited<ReturnType<Decider["decide"]>>;
@@ -130,7 +130,7 @@ test("a failing lent tool abandons the draft; a model error is not mistaken for 
 });
 
 /** Runs the service against a scripted guest that delivers the given mentions in the watched chat; returns what it sent and who it paged. */
-async function mentions(t: { after(fn: () => void): void }, texts: string[], compose: Parameters<typeof appleMessages>[0]["compose"], env: Record<string, string> = {}) {
+async function mentions(t: { after(fn: () => void): void }, texts: string[], compose: Parameters<typeof appleMessages>[0]["compose"], env: Record<string, string> = {}, opts: { fromMe?: boolean; actionP?: number } = {}) {
 	const dir = await mkdtemp(join(tmpdir(), "nano-messages-web-"));
 	t.after(() => rm(dir, { recursive: true, force: true }));
 	const setup = {
@@ -140,6 +140,7 @@ async function mentions(t: { after(fn: () => void): void }, texts: string[], com
 		NANO_APPLE_MESSAGES_REPLY: "on",
 		NANO_TEST_SENT: join(dir, "sent.jsonl"),
 		NANO_TEST_TEXTS: JSON.stringify(texts),
+		NANO_TEST_FROM_ME: opts.fromMe ? "1" : "",
 		...env,
 	};
 	const previous = Object.fromEntries(Object.keys(setup).map((key) => [key, process.env[key]]));
@@ -161,13 +162,14 @@ createInterface({ input: process.stdin }).once("line", (line) => {
   console.log(JSON.stringify({ kind: "ready", generation: "guest-1", cursor: request.start?.cursor ?? 0 }));
   if (request.start) return;
   JSON.parse(process.env.NANO_TEST_TEXTS).forEach((text, i) => console.log(JSON.stringify({ kind: "message", message: {
-    id: i + 1, chat_id: 7, chat_guid: "iMessage;+;chat123", sender: "friend@example.com", is_from_me: false, attachments: [], text,
+    id: i + 1, chat_id: 7, chat_guid: "iMessage;+;chat123", sender: "friend@example.com", is_from_me: !!process.env.NANO_TEST_FROM_ME, attachments: [], text,
   }})));
   process.stdin.unref();
 });
 `, { mode: 0o700 });
 	const notices: string[] = [];
 	const verdicts: unknown[] = [];
+	let actions = 0;
 	const abort = new AbortController();
 	const service = appleMessages({
 		config: loadConfig({ NANO_CHANNEL: "stdin", NANO_DATA_DIR: dir, NANO_OWNER: "owner", BRAVE_SEARCH_API_KEY: "test-key" }),
@@ -179,7 +181,8 @@ createInterface({ input: process.stdin }).once("line", (line) => {
 					verdicts.push(request.state);
 					return { model: "test-model", answers: { verdict: { type: "choice", choice: "send", confidence: 0.97 } } };
 				}
-				return { model: "test-model", answers: { action: { type: "choice", choice: "notify", confidence: 0.98 } } };
+				actions++;
+				return { model: "test-model", answers: { action: { type: "choice", choice: "notify", confidence: opts.actionP ?? 0.98 } } };
 			},
 		},
 		compose,
@@ -192,7 +195,7 @@ createInterface({ input: process.stdin }).once("line", (line) => {
 		await sleep(100);
 		return read();
 	};
-	return { sent, notices, verdicts, stop: async () => { abort.abort(); await service; } };
+	return { sent, notices, verdicts, actions: () => actions, stop: async () => { abort.abort(); await service; } };
 }
 
 test("a mention asking for live public info is answered from web results, and one needing owner tools still declines", async (t) => {
@@ -222,7 +225,7 @@ test("a mention asking for live public info is answered from web results, and on
 	});
 	t.after(run.stop);
 	const sent = await run.sent();
-	assert.deepEqual(toolNames, [["web_search", "web_fetch"], ["web_search", "web_fetch"]]);
+	assert.deepEqual(toolNames, [["web_search", "web_fetch", "read_chat"], ["web_search", "web_fetch", "read_chat"]]);
 	assert.equal(sent[0], "🤖 EXMP closed around $12.34 per the page I just read, but prices move.");
 	assert.equal(sent[1], "🤖 I can't do that here: I have no access to anyone's calendar.");
 	assert.deepEqual(ran, ["web_search", "web_fetch"], "the unlisted calendar tool never ran");
@@ -261,5 +264,41 @@ test("NANO_APPLE_MESSAGES_WEB=off lends no tools", async (t) => {
 	const run = await mentions(t, ["Nano hi"], async (_system, _user, _signal, options) => { lent = options?.tools; return "Hello!"; }, { NANO_APPLE_MESSAGES_WEB: "off" });
 	t.after(run.stop);
 	assert.deepEqual(await run.sent(), ["🤖 Hello!"]);
-	assert.deepEqual(lent, []);
+	assert.deepEqual((lent as { name: string }[]).map((tool) => tool.name), ["read_chat"], "only the chat read, no web tools");
+});
+
+test("a third party's mention needs 0.6 confidence, and the owner's own mention is always answered without asking the decision model", async (t) => {
+	const compose = async () => "Sure.";
+	const unsure = await mentions(t, ["Nano what do you think"], compose, {}, { actionP: 0.65 });
+	t.after(unsure.stop);
+	assert.deepEqual(await unsure.sent(), ["🤖 Sure."]);
+	await unsure.stop();
+
+	const lost = await mentions(t, ["Nano what do you think"], compose, {}, { actionP: 0.5 });
+	t.after(lost.stop);
+	await sleep(600);
+	assert.deepEqual(await lost.sent().catch(() => []), []);
+	assert.equal(lost.actions(), 1);
+	await lost.stop();
+
+	const owner = await mentions(t, ["Nano answer Ryan's question"], compose, {}, { fromMe: true, actionP: 0.1 });
+	t.after(owner.stop);
+	assert.deepEqual(await owner.sent(), ["🤖 Sure."]);
+	assert.equal(owner.actions(), 0, "no decision is needed for the owner");
+});
+
+test("read_chat reads only the mentioning chat, clamps the count, leaves out the mention and later messages, and records what it read", async () => {
+	const messages = Array.from({ length: 12 }, (_, i) => ({ id: i + 1, chat_id: 7, is_from_me: false, sender_name: "Sam", attachments: [], text: `message ${i + 1}`, created_at: new Date(Date.UTC(2026, 10, 25, 17, i)).toISOString() }));
+	const loads: { chat: string; limit: number }[] = [];
+	const seen: string[] = [];
+	const tool = chatTool({ id: 10, chat: "iMessage;+;chat123" }, seen, async (chat, limit) => { loads.push({ chat, limit }); return messages; });
+	assert.equal(tool.name, "read_chat");
+	assert.ok(!("chat" in (tool.parameters.properties as object)), "the model cannot choose a chat");
+	const read = await tool.run({ count: 3, chat: "iMessage;+;other" }, new AbortController().signal);
+	assert.deepEqual(loads, [{ chat: "iMessage;+;chat123", limit: 100 }]);
+	assert.equal(read, ["Sam (3 min before): message 7", "Sam (2 min before): message 8", "Sam (just before): message 9"].join("\n"));
+	assert.deepEqual(seen, [read]);
+	assert.doesNotMatch(read, /message 10|message 11/);
+	assert.match(await tool.run({ count: 9999 }, new AbortController().signal), /message 1$|message 1\n/m);
+	assert.match(await chatTool({ id: 1, chat: "x" }, [], async () => []).run({}, new AbortController().signal), /No earlier messages/);
 });

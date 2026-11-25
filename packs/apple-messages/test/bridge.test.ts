@@ -260,8 +260,8 @@ createInterface({ input: process.stdin }).once("line", (line) => {
 			},
 		},
 		compose: async (system, user, _signal, options) => {
-			assert.match(system, /only tools are web_search and web_fetch/);
-			assert.deepEqual(options?.tools?.map((tool) => tool.name), ["web_fetch"]);
+			assert.match(system, /only tools are web_search and web_fetch, which read the public web, and read_chat/);
+			assert.deepEqual(options?.tools?.map((tool) => tool.name), ["web_fetch", "read_chat"]);
 			assert.doesNotMatch(user, /owner@|profile/);
 			composed.push(user);
 			if (user.includes("deny during drafting")) {
@@ -376,7 +376,7 @@ createInterface({ input: process.stdin }).once("line", (line) => {
 		// Every sent draft passed the approval gate, and no draft ever had more than the two web tools.
 		assert.equal(gated.length, 5);
 		assert.equal(decided.filter((source) => source === "apple-messages-reply").length, 5);
-		assert.deepEqual(toolNames, Array.from({ length: 5 }, () => ["web_search", "web_fetch"]));
+		assert.deepEqual(toolNames, Array.from({ length: 5 }, () => ["web_search", "web_fetch", "read_chat"]));
 		// The denied chats got nothing: no decision, no draft, no send.
 		assert.equal(decided.filter((source) => source === "apple-messages").length, 5);
 	} finally {
@@ -468,21 +468,22 @@ createInterface({ input: process.stdin }).once("line", (line) => {
 		assert.match(sent[0].text, /Claude/);
 		assert.match(sent[0].text, /Codex/);
 		assert.doesNotMatch(sent[0].text, /what are the options/i);
-		const context = [
-			"Someone: I blasted through my $200 free cursor plan this month",
-			"Sam: Both grok model usage and 3rd party",
-			"Sam: Not sure what to do now",
-			"Sam: Do I try Claude for a month",
-			"Sam: Or codex",
+		const expected = [
+			"Sam (2 h before): A message from long ago",
+			"Owner (4 min before): Sure, go ahead",
+			"Someone (3 min before): I blasted through my $200 free cursor plan this month",
+			"Sam (2 min before): Both grok model usage and 3rd party",
+			"Sam (2 min before): Not sure what to do now",
+			"Sam (just before): Do I try Claude for a month",
+			"Sam (just before): Or codex",
 		].join("\n");
-		// The owner's turn is kept and labelled, an unnamed sender shows as Someone, never their handle; robot replies, codes, later messages and stale ones are not.
-		const expected = ["Owner: Sure, go ahead", context].join("\n");
+		// The owner's turn is kept and labelled with its age, an unnamed sender shows as Someone, never their handle. Old messages stay (the latest few count, however old); robot replies, codes and later messages do not.
 		assert.equal(prompts.length, 1);
 		assert.ok(prompts[0].user.includes(expected), prompts[0].user);
 		assert.ok(prompts[0].user.indexOf(expected) < prompts[0].user.indexOf("Nano which one should I try"));
-		assert.doesNotMatch(prompts[0].user.split("Message that mentioned Nano")[0], /robot reply|482913|later message|long ago|which one should I try/);
+		assert.doesNotMatch(prompts[0].user.split("Message that mentioned Nano")[0], /robot reply|482913|later message|which one should I try/);
 		assert.doesNotMatch(prompts[0].user, /15550123/);
-		assert.match(prompts[0].system, /only tools are web_search and web_fetch/);
+		assert.match(prompts[0].system, /only tools are web_search and web_fetch, which read the public web, and read_chat/);
 		assert.match(prompts[0].system, /Never ask what the options are when they were named in the chat/);
 		// The approval check gets exactly the same context.
 		assert.equal(gated.length, 1);
