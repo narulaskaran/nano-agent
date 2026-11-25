@@ -1,5 +1,6 @@
 import { join } from "node:path";
 import { Conversation, StateStore } from "./agent.ts";
+import { composeWith } from "./compose.ts";
 import { createDecider, decisionTransport } from "./decide.ts";
 import { type Channel, createPhotonChannel, createStdinChannel } from "./channel.ts";
 import { currentTimezone, loadConfig, startTimezoneSync } from "./config.ts";
@@ -112,10 +113,11 @@ async function main(): Promise<void> {
 		decider,
 		signal: packServices.signal,
 		notifyOwner: (text) => conversation(config.owner).deliver(text),
-		compose: async (system, user, signal) => {
+		compose: async (system, user, signal, options) => {
 			await refreshProviderSettings(config, modelRuntime);
 			const composer = getMainModel(config, modelRuntime);
 			if (!composer) throw new Error("The main model is unavailable");
+			if (options?.tools?.length) return composeWith((context, abort) => modelRuntime.completeSimple(composer, context, { signal: abort }), system, user, signal, options);
 			const reply = await completeText(modelRuntime, composer, system, [user], { signal });
 			if (reply.error) throw new Error(reply.error);
 			return reply.text;

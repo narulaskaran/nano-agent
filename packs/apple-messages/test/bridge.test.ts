@@ -195,7 +195,7 @@ exec "$NANO_TEST_NODE" "$NANO_TEST_BRIDGE" "$HOME/imsg"
 	assert.equal(await new Promise((resolve) => unauthorized.once("close", resolve)), 1);
 });
 
-test("replies are drafted without tools, checked by the decision model, and posted once", async (t) => {
+test("replies are drafted with only the web tools, checked by the decision model, and posted once", async (t) => {
 	const dir = await mkdtemp(join(tmpdir(), "nano-messages-reply-"));
 	t.after(() => rm(dir, { recursive: true, force: true }));
 	const setup = {
@@ -257,8 +257,9 @@ createInterface({ input: process.stdin }).once("line", (line) => {
 				return { model: "test-model", answers: { action: { type: "choice", choice: "notify", confidence: 0.98 } } };
 			},
 		},
-		compose: async (system, user) => {
-			assert.match(system, /no tools/);
+		compose: async (system, user, _signal, options) => {
+			assert.match(system, /only tools are web_search and web_fetch/);
+			assert.deepEqual(options?.tools?.map((tool) => tool.name), ["web_fetch"]);
 			assert.doesNotMatch(user, /owner@|profile/);
 			composed.push(user);
 			if (user.includes("deny during drafting")) {

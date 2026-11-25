@@ -4,6 +4,7 @@ import { pathToFileURL } from "node:url";
 import type { ExtensionFactory } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import type { Channel } from "./channel.ts";
+import type { ComposeOptions } from "./compose.ts";
 import type { Config } from "./config.ts";
 import type { Decider } from "./decide.ts";
 import type { Scheduler } from "./scheduler.ts";
@@ -46,10 +47,11 @@ export interface PackServiceContext {
 	signal: AbortSignal;
 	notifyOwner: (text: string) => Promise<void>;
 	/**
-	 * One plain completion on the main model with the given system prompt: no tools, no owner profile or memory,
-	 * no conversation. For text written to third parties, which must not carry the owner's context.
+	 * One completion on the main model with the given system prompt: no owner profile or memory, no conversation, and no
+	 * tools except the ones the caller lends in `options.tools` (see compose.ts). For text written to third parties, which
+	 * must not carry the owner's context.
 	 */
-	compose: (system: string, user: string, signal: AbortSignal) => Promise<string>;
+	compose: (system: string, user: string, signal: AbortSignal, options?: ComposeOptions) => Promise<string>;
 }
 
 export async function startPackServices(ctx: PackServiceContext): Promise<void> {
