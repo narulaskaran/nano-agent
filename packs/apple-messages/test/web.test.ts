@@ -130,7 +130,10 @@ test("a failing lent tool abandons the draft; a model error is not mistaken for 
 });
 
 /** Runs the service against a scripted guest that delivers the given mentions in the watched chat; returns what it sent and who it paged. */
-async function mentions(t: { after(fn: () => void): void }, texts: string[], compose: Parameters<typeof appleMessages>[0]["compose"], env: Record<string, string> = {}, opts: { fromMe?: boolean; actionP?: number } = {}) {
+async function mentions(t: { after(fn: () => void): void }, texts: string[], compose: Parameters<typeof appleMessages>[0]["compose"], env: Record<string, string> = {}, opts: {
+	fromMe?: boolean; actionP?: number;
+	check?: (count: number) => Awaited<ReturnType<Parameters<typeof appleMessages>[0]["decider"]["decide"]>>["answers"];
+} = {}) {
 	const dir = await mkdtemp(join(tmpdir(), "nano-messages-web-"));
 	t.after(() => rm(dir, { recursive: true, force: true }));
 	const setup = {
@@ -138,6 +141,7 @@ async function mentions(t: { after(fn: () => void): void }, texts: string[], com
 		NANO_APPLE_MESSAGES_SSH_CONFIG: join(dir, "unused"),
 		NANO_APPLE_MESSAGES_WATCH: "on",
 		NANO_APPLE_MESSAGES_REPLY: "on",
+		NANO_APPLE_MESSAGES_CHATS: "iMessage;+;chat123",
 		NANO_TEST_SENT: join(dir, "sent.jsonl"),
 		NANO_TEST_TEXTS: JSON.stringify(texts),
 		NANO_TEST_FROM_ME: opts.fromMe ? "1" : "",
@@ -179,7 +183,7 @@ createInterface({ input: process.stdin }).once("line", (line) => {
 			async decide(request): Promise<DecisionResponse> {
 				if (request.questions.verdict) {
 					verdicts.push(request.state);
-					return { model: "test-model", answers: { verdict: { type: "choice", choice: "send", confidence: 0.97 } } };
+					return { model: "test-model", answers: opts.check?.(verdicts.length) ?? { verdict: { type: "choice", choice: "send", confidence: 0.97 } } };
 				}
 				actions++;
 				return { model: "test-model", answers: { action: { type: "choice", choice: "notify", confidence: opts.actionP ?? 0.98 } } };
@@ -244,7 +248,7 @@ test("a failing or hanging search falls back to the fixed reply without paging a
 	web.failSearch = true;
 	const failing = await mentions(t, ["Nano what is the latest EXMP price"], lend);
 	t.after(failing.stop);
-	assert.deepEqual(await failing.sent(), ["🤖 I can’t answer that here."]);
+	assert.deepEqual(await failing.sent(), ["🤖 I can’t answer right now. Try again in a bit."]);
 	assert.deepEqual(failing.notices, []);
 	assert.deepEqual(failing.verdicts, [], "no draft, so nothing to gate");
 	await failing.stop();
@@ -254,7 +258,7 @@ test("a failing or hanging search falls back to the fixed reply without paging a
 	const started = Date.now();
 	const hanging = await mentions(t, ["Nano what is the latest EXMP price"], lend);
 	t.after(hanging.stop);
-	assert.deepEqual(await hanging.sent(), ["🤖 I can’t answer that here."]);
+	assert.deepEqual(await hanging.sent(), ["🤖 I can’t answer right now. Try again in a bit."]);
 	assert.ok(Date.now() - started < 5000, "the search timed out quickly instead of hanging the mention");
 	assert.deepEqual(hanging.notices, []);
 });
@@ -267,24 +271,45 @@ test("NANO_APPLE_MESSAGES_WEB=off lends no tools", async (t) => {
 	assert.deepEqual((lent as { name: string }[]).map((tool) => tool.name), ["read_chat"], "only the chat read, no web tools");
 });
 
-test("a third party's mention needs 0.6 confidence, and the owner's own mention is always answered without asking the decision model", async (t) => {
+test("the same word match invokes Nano for participants and the owner without an intent decision", async (t) => {
 	const compose = async () => "Sure.";
-	const unsure = await mentions(t, ["Nano what do you think"], compose, {}, { actionP: 0.65 });
-	t.after(unsure.stop);
-	assert.deepEqual(await unsure.sent(), ["🤖 Sure."]);
-	await unsure.stop();
+	const participant = await mentions(t, ["🤖 What about Nano?", "What's Nano doing in 2026?"], compose, {}, { actionP: 0.1 });
+	t.after(participant.stop);
+	assert.deepEqual(await participant.sent(), ["🤖 Sure.", "🤖 Sure."]);
+	assert.equal(participant.actions(), 0);
+	await participant.stop();
 
-	const lost = await mentions(t, ["Nano what do you think"], compose, {}, { actionP: 0.5 });
-	t.after(lost.stop);
-	await sleep(600);
-	assert.deepEqual(await lost.sent().catch(() => []), []);
-	assert.equal(lost.actions(), 1);
-	await lost.stop();
-
-	const owner = await mentions(t, ["Nano answer Ryan's question"], compose, {}, { fromMe: true, actionP: 0.1 });
+	const owner = await mentions(t, ["Nano answer the question"], compose, {}, { fromMe: true, actionP: 0.1 });
 	t.after(owner.stop);
 	assert.deepEqual(await owner.sent(), ["🤖 Sure."]);
-	assert.equal(owner.actions(), 0, "no decision is needed for the owner");
+	assert.equal(owner.actions(), 0);
+});
+
+test("a strong block gets one rewrite, then a decline in chat and a private reason", async (t) => {
+	let drafts = 0;
+	const run = await mentions(t, ["Nano please answer"], async () => {
+		drafts++;
+		return "I'll pay for the trip.";
+	}, {}, { check: (count) => ({
+		verdict: { type: "choice", choice: "block", probabilities: { block: count === 1 ? 0.8 : 0.95 }, confidence: 0.4 },
+		reason: { type: "choice", choice: "speaking_for_owner" },
+		repair: { type: "choice", choice: "rewrite" },
+	}) });
+	t.after(run.stop);
+	assert.deepEqual(await run.sent(), ["🤖 I can’t answer that here."]);
+	assert.equal(drafts, 2);
+	assert.equal(run.notices.length, 1);
+	assert.match(run.notices[0], /commitments, promises/);
+});
+
+test("a checker outage retries and sends only the temporary-unavailable reply", async (t) => {
+	const run = await mentions(t, ["Nano please answer"], async () => "The draft must stay private during an outage.", {}, {
+		check: () => { throw new Error("temporarily unavailable"); },
+	});
+	t.after(run.stop);
+	assert.deepEqual(await run.sent(), ["🤖 I can’t answer right now. Try again in a bit."]);
+	assert.equal(run.verdicts.length, 3);
+	assert.deepEqual(run.notices, []);
 });
 
 test("read_chat reads only the mentioning chat, clamps the count, leaves out the mention and later messages, and records what it read", async () => {
@@ -296,7 +321,7 @@ test("read_chat reads only the mentioning chat, clamps the count, leaves out the
 	assert.ok(!("chat" in (tool.parameters.properties as object)), "the model cannot choose a chat");
 	const read = await tool.run({ count: 3, chat: "iMessage;+;other" }, new AbortController().signal);
 	assert.deepEqual(loads, [{ chat: "iMessage;+;chat123", limit: 100 }]);
-	assert.equal(read, ["Sam (3 min before): message 7", "Sam (2 min before): message 8", "Sam (just before): message 9"].join("\n"));
+	assert.equal(read, ["Participant (3 min before): message 7", "Participant (2 min before): message 8", "Participant (just before): message 9"].join("\n"));
 	assert.deepEqual(seen, [read]);
 	assert.doesNotMatch(read, /message 10|message 11/);
 	assert.match(await tool.run({ count: 9999 }, new AbortController().signal), /message 1$|message 1\n/m);

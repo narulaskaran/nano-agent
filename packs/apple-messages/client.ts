@@ -54,6 +54,16 @@ export async function ask(request: { op: string; [key: string]: unknown }, signa
 	return JSON.parse(output);
 }
 
+/** Reads the chat's history from the guest with the bridge's existing chat and history requests. */
+export async function loadHistory(chat: string, limit: number, signal: AbortSignal): Promise<Message[]> {
+	const found = (await ask({ op: "chat", chat_guid: chat }, signal)) as { chat?: { id?: number } | null };
+	const id = found.chat?.id;
+	if (!Number.isSafeInteger(id)) throw new Error("Chat not found for message context");
+	const { messages } = (await ask({ op: "history", id, limit }, signal)) as { messages: Message[] };
+	if (!Array.isArray(messages)) throw new Error("Invalid Messages history response");
+	return messages;
+}
+
 /** Delivers one approved reply through the guest. Never retry a failure with an unknown outcome. */
 export async function sendReply(chatGuid: string, text: string, signal: AbortSignal): Promise<void> {
 	const child = connect({ op: "send", chat_guid: chatGuid, text }, signal);

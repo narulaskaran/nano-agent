@@ -203,6 +203,7 @@ test("replies are drafted with only the web tools, checked by the decision model
 		NANO_APPLE_MESSAGES_SSH_CONFIG: join(dir, "unused"),
 		NANO_APPLE_MESSAGES_WATCH: "on",
 		NANO_APPLE_MESSAGES_REPLY: "on",
+		NANO_APPLE_MESSAGES_CHATS: "iMessage;+;chat123,iMessage;+;blocked-while-drafting",
 		NANO_TEST_SENT: join(dir, "sent.jsonl"),
 	};
 	withEnv(t, setup);
@@ -274,9 +275,11 @@ createInterface({ input: process.stdin }).once("line", (line) => {
 	});
 	try {
 		const deadline = Date.now() + 8000;
-		while (notices.length < 1 && Date.now() < deadline) await sleep(25);
-		assert.equal(notices.length, 1);
-		assert.match(notices[0], /could not send my reply .*message 7/);
+		while (notices.length < 3 && Date.now() < deadline) await sleep(25);
+		assert.equal(notices.length, 3);
+		assert.match(notices[0], /declined.*message 1/);
+		assert.match(notices[1], /declined.*message 3/);
+		assert.match(notices[2], /couldn’t confirm.*message 7/);
 		assert.equal(verdicts.length, 4);
 		assert.equal(composed.length, 7);
 		const sent = (await readFile(setup.NANO_TEST_SENT, "utf8")).trim().split("\n").map((line) => JSON.parse(line));
@@ -285,7 +288,7 @@ createInterface({ input: process.stdin }).once("line", (line) => {
 			"🤖 " + drafts["share a link"],
 			"🤖 I can’t answer that here.",
 			"🤖 I can answer general questions here.",
-			"🤖 I can’t answer that here.",
+			"🤖 I can’t answer right now. Try again in a bit.",
 		]);
 		assert.ok(sent.every((request) => request.op === "send" && request.chat_guid === "iMessage;+;chat123"));
 	} finally {
@@ -294,7 +297,7 @@ createInterface({ input: process.stdin }).once("line", (line) => {
 	}
 });
 
-test("a mention in any chat that is not denied gets the same gated reply, and the denylist still excludes", async (t) => {
+test("an owner mention enables a chat, other bots can trigger it, and the denylist still excludes", async (t) => {
 	const dir = await mkdtemp(join(tmpdir(), "nano-messages-all-chats-"));
 	t.after(() => rm(dir, { recursive: true, force: true }));
 	const setup = {
@@ -302,9 +305,8 @@ test("a mention in any chat that is not denied gets the same gated reply, and th
 		NANO_APPLE_MESSAGES_SSH_CONFIG: join(dir, "unused"),
 		NANO_APPLE_MESSAGES_WATCH: "on",
 		NANO_APPLE_MESSAGES_REPLY: "on",
-		NANO_TEST_SENT: join(dir, "sent.jsonl"),
-		// No chat allowlist: every chat not denied is watched.
 		NANO_APPLE_MESSAGES_CHATS: "",
+		NANO_TEST_SENT: join(dir, "sent.jsonl"),
 	};
 	withEnv(t, setup);
 	await writeFile(join(dir, "ssh"), `#!/usr/bin/env node
@@ -317,16 +319,17 @@ createInterface({ input: process.stdin }).once("line", (line) => {
   if (request.op === "history") return console.log(JSON.stringify({ messages: JSON.parse(process.env.NANO_TEST_HISTORY || "[]") }));
   console.log(JSON.stringify({ kind: "ready", generation: "guest-1", cursor: request.start?.cursor ?? 0 }));
   if (request.start) return;
-  const emit = (id, chat_id, chat_guid) => console.log(JSON.stringify({ kind: "message", message: {
-    id, chat_id, chat_guid, sender: "friend@example.com", is_from_me: false, attachments: [], text: "Nano, what is up?",
+  const emit = (id, chat_id, chat_guid, is_from_me = false, text = "Nano, what is up?") => console.log(JSON.stringify({ kind: "message", message: {
+    id, chat_id, chat_guid, sender: "friend@example.com", is_from_me, attachments: [], text,
   }}));
   emit(1, 6, "iMessage;+;group-chat");
-  emit(2, 24, "iMessage;-;+15550100");
-  emit(3, 175, "iMessage;-;+15550101");
-  emit(4, 90, "iMessage;+;another-group");
-  emit(5, 91, "iMessage;-;friend@example.com");
-  emit(6, 92, "iMessage;+;denied-group");
-  emit(7, 93, "iMessage;-;+15550199");
+  emit(2, 6, "iMessage;+;group-chat", true);
+  emit(3, 6, "iMessage;+;group-chat", false, "🤖 Hi Nano");
+  emit(4, 24, "iMessage;-;+15550100", true);
+  emit(5, 90, "iMessage;+;another-group", true);
+  emit(6, 91, "iMessage;-;friend@example.com", true);
+  emit(7, 92, "iMessage;+;denied-group", true);
+  emit(8, 93, "iMessage;-;+15550199", true);
   process.stdin.unref();
 });
 `, { mode: 0o700 });
@@ -365,20 +368,20 @@ createInterface({ input: process.stdin }).once("line", (line) => {
 		while (await count() < 5 && Date.now() < deadline) await sleep(25);
 		await sleep(300);
 		const sent = (await readFile(sentPath, "utf8")).trim().split("\n").map((line) => JSON.parse(line));
-		assert.deepEqual(sent.map((request) => request.chat_guid), [
+		assert.deepEqual(sent.map((request) => request.chat_guid).sort(), [
+			"iMessage;+;group-chat",
 			"iMessage;+;group-chat",
 			"iMessage;-;+15550100",
-			"iMessage;-;+15550101",
 			"iMessage;+;another-group",
 			"iMessage;-;friend@example.com",
-		]);
+		].sort());
 		assert.ok(sent.every((request) => request.op === "send" && request.text === "🤖 All good here."));
 		// Every sent draft passed the approval gate, and no draft ever had more than the two web tools.
 		assert.equal(gated.length, 5);
 		assert.equal(decided.filter((source) => source === "apple-messages-reply").length, 5);
 		assert.deepEqual(toolNames, Array.from({ length: 5 }, () => ["web_search", "web_fetch", "read_chat"]));
 		// The denied chats got nothing: no decision, no draft, no send.
-		assert.equal(decided.filter((source) => source === "apple-messages").length, 5);
+		assert.equal(decided.filter((source) => source === "apple-messages").length, 0);
 	} finally {
 		abort.abort();
 		await service;
@@ -400,7 +403,7 @@ test("the draft and the approval check both see the chat just before the mention
 		line(198, "Do I try Claude for a month", 1),
 		line(197, "Not sure what to do now", 2),
 		line(196, "Both grok model usage and 3rd party", 2),
-		line(195, "🤖 An earlier robot reply", 3),
+		line(195, "🤖 An earlier robot reply", 3, { is_from_me: true }),
 		line(194, "Your verification code is 482913", 3),
 		line(193, "I blasted through my $200 free cursor plan this month", 3, { sender_name: undefined, sender: "+15550123" }),
 		line(192, "Sure, go ahead", 4, { is_from_me: true }),
@@ -411,6 +414,7 @@ test("the draft and the approval check both see the chat just before the mention
 		NANO_APPLE_MESSAGES_SSH_CONFIG: join(dir, "unused"),
 		NANO_APPLE_MESSAGES_WATCH: "on",
 		NANO_APPLE_MESSAGES_REPLY: "on",
+		NANO_APPLE_MESSAGES_CHATS: "iMessage;+;chat123",
 		NANO_TEST_SENT: join(dir, "sent.jsonl"),
 		NANO_TEST_HISTORY: JSON.stringify(history),
 		NANO_TEST_MENTION: JSON.stringify(history.find((message) => message.id === mentionId)),
@@ -468,34 +472,25 @@ createInterface({ input: process.stdin }).once("line", (line) => {
 		assert.match(sent[0].text, /Claude/);
 		assert.match(sent[0].text, /Codex/);
 		assert.doesNotMatch(sent[0].text, /what are the options/i);
-		const expected = [
-			"Sam (2 h before): A message from long ago",
-			"Owner (4 min before): Sure, go ahead",
-			"Someone (3 min before): I blasted through my $200 free cursor plan this month",
-			"Sam (2 min before): Both grok model usage and 3rd party",
-			"Sam (2 min before): Not sure what to do now",
-			"Sam (just before): Do I try Claude for a month",
-			"Sam (just before): Or codex",
-		].join("\n");
-		// The owner's turn is kept and labelled with its age, an unnamed sender shows as Someone, never their handle. Old messages stay (the latest few count, however old); robot replies, codes and later messages do not.
+		const input = JSON.parse(prompts[0].user);
+		const context = input.recent_chat;
 		assert.equal(prompts.length, 1);
-		assert.ok(prompts[0].user.includes(expected), prompts[0].user);
-		assert.ok(prompts[0].user.indexOf(expected) < prompts[0].user.indexOf("Nano which one should I try"));
-		assert.doesNotMatch(prompts[0].user.split("Message that mentioned Nano")[0], /robot reply|482913|later message|which one should I try/);
-		assert.doesNotMatch(prompts[0].user, /15550123/);
+		assert.match(context, /Participant [a-f0-9]+ \(2 h before\): A message from long ago/);
+		assert.match(context, /Owner \(4 min before\): Sure, go ahead/);
+		assert.match(context, /Nano \(3 min before\): 🤖 An earlier robot reply/);
+		assert.doesNotMatch(context, /Sam|15550123|482913|later message|which one should I try/);
 		assert.match(prompts[0].system, /only tools are web_search and web_fetch, which read the public web, and read_chat/);
-		assert.match(prompts[0].system, /Never ask what the options are when they were named in the chat/);
-		// The approval check gets exactly the same context.
 		assert.equal(gated.length, 1);
-		assert.equal(gated[0].recent_chat_context, expected);
-		assert.equal(gated[0].incoming_message_from_a_third_party, "Nano which one should I try");
+		assert.equal(gated[0].recent_chat_context, context);
+		assert.equal(gated[0].incoming_message, "Nano which one should I try");
+
 	} finally {
 		abort.abort();
 		await service;
 	}
 });
 
-test("an unsure decision produces the fixed fallback", async (t) => {
+test("an uncertain send is sent by default", async (t) => {
 	const dir = await mkdtemp(join(tmpdir(), "nano-messages-unsure-"));
 	t.after(() => rm(dir, { recursive: true, force: true }));
 	const setup = {
@@ -503,6 +498,7 @@ test("an unsure decision produces the fixed fallback", async (t) => {
 		NANO_APPLE_MESSAGES_SSH_CONFIG: join(dir, "unused"),
 		NANO_APPLE_MESSAGES_WATCH: "on",
 		NANO_APPLE_MESSAGES_REPLY: "on",
+		NANO_APPLE_MESSAGES_CHATS: "iMessage;+;chat123",
 		NANO_TEST_SENT: join(dir, "sent.jsonl"),
 	};
 	withEnv(t, setup);
@@ -538,7 +534,7 @@ createInterface({ input: process.stdin }).once("line", (line) => {
 		const deadline = Date.now() + 5000;
 		while (!existsSync(setup.NANO_TEST_SENT) && Date.now() < deadline) await sleep(25);
 		const sent = JSON.parse(await readFile(setup.NANO_TEST_SENT, "utf8"));
-		assert.equal(sent.text, "🤖 I can’t answer that here.");
+		assert.equal(sent.text, "🤖 Hi there!");
 		assert.deepEqual(notices, []);
 	} finally {
 		abort.abort();
