@@ -1,6 +1,6 @@
 import { execFile } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { type Config, currentTimezone } from "./config.ts";
 import { createDecider, type Decider, DecisionError, logDecisionEvent } from "./decide.ts";
@@ -288,7 +288,9 @@ export class Scheduler {
 			const donePath = path.replace(/\.(json|txt)$/, ".done");
 			if (durable && existsSync(donePath)) { rmSync(path); continue; }
 			let item: { text?: string; kind?: string; to?: string };
+			let stamp = 0;
 			try {
+				stamp = statSync(path).mtimeMs;
 				const raw = readFileSync(path, "utf8");
 				item = name.endsWith(".json") ? JSON.parse(raw) : { text: raw };
 				if (!durable) rmSync(path); // Existing plain outbox keeps its one-shot behavior.
@@ -306,7 +308,7 @@ export class Scheduler {
 			console.error(`nano: outbox ${item.kind === "task" ? "task" : "message"} from ${name}`);
 			try {
 				if (item.kind === "task") await this.sink.task(to, text);
-				else await this.sink.send(to, text, durable ? `outbox:${path}` : undefined);
+				else await this.sink.send(to, text, durable ? `outbox:${path}:${stamp}` : undefined);
 				if (durable) renameSync(path, donePath);
 			} catch (error) {
 				console.error(`nano: outbox delivery failed for ${name}:`, (error as Error)?.message ?? error);
