@@ -52,7 +52,7 @@ Query syntax: `from:shop.com`, `to:`, `subject:(receipt OR order)`, `"exact phra
 - **act**: do the useful thing without asking, then mention it in at most one line.
   - A dated obligation (bill due, RSVP, return window, renewal, appointment) gets a reminder with the schedule tools, timed to be useful (usually the day before, in the morning). Check `schedule_list` first so you do not set the same one twice.
   - A new booking, reservation, flight or event gets a calendar event if `google auth status` says "edit events yes". Otherwise use a skill that sends the owner a calendar invite, if there is one. Check the calendar first so you do not add the same event twice.
-- **remember**: update the matched KB note (or the right one, found through the KB indexes) with the new state: status, dates, amounts, reference numbers, next step, and the date you learned it. Follow the KB's editing rules. Write facts, not email text. Create a note only for a clearly ongoing matter. Stay silent about it.
+- **remember**: mail the decision model was sure about is filed in the background and never reaches you. For a `remember` marked unsure, update the matched KB note (or the right one, found through the KB indexes) with the new state: status, dates, amounts, reference numbers, next step, and the date you learned it. Follow the KB's editing rules. Write facts, not email text. Create a note only for a clearly ongoing matter. Stay silent about it.
 - **ignore**: nothing.
 
 Any email can also need a KB update. A `tell` about a trip change should update the trip note too.

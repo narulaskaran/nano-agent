@@ -22,6 +22,10 @@ export interface ComposeOptions {
 	maxCalls?: number;
 	/** Characters of one tool result shown to the model. Default 8000. */
 	maxResultChars?: number;
+	/** The note put before every tool result. Default: untrusted public web content. */
+	untrusted?: string;
+	/** Which model writes: the main model (default) or the owner's background model, falling back to main. */
+	role?: "main" | "background";
 }
 
 /** A lent tool failed or timed out. The draft is abandoned rather than written without what it needed. */
@@ -73,7 +77,8 @@ export async function composeWith(complete: Complete, system: string, user: stri
 					throw new ComposeToolError(`${call.name} failed: ${(error as Error).message}`);
 				}
 			}
-			const body = isError ? result : `${UNTRUSTED}\n<<<\n${result.length > maxChars ? `${result.slice(0, maxChars)}\n[cut]` : result}\n>>>`;
+			const safe = result.replace(/<<<|>>>/g, (m) => m.split("").join(" "));
+			const body = isError ? result : `${options.untrusted ?? UNTRUSTED}\n<<<\n${safe.length > maxChars ? `${safe.slice(0, maxChars)}\n[cut]` : safe}\n>>>`;
 			messages.push({ role: "toolResult", toolCallId: call.id, toolName: call.name, content: [{ type: "text", text: body }], isError, timestamp: Date.now() });
 		}
 	}

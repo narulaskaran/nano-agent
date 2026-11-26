@@ -4,7 +4,7 @@ import { Type } from "typebox";
 import type { Channel } from "./channel.ts";
 import { type Config, localStamp } from "./config.ts";
 import { refreshProviderSettings } from "./provider-settings.ts";
-import { resolveModel } from "./models.ts";
+import { getBackgroundModel, resolveModel } from "./models.ts";
 import { packExtensions } from "./packs.ts";
 import { buildSystemPrompt } from "./prompt.ts";
 import type { Scheduler } from "./scheduler.ts";
@@ -35,7 +35,7 @@ export function createWorkerRunner(deps: { config: Config; modelRuntime: ModelRu
 	return async (task, signal, update) => {
 		await refreshProviderSettings(config, modelRuntime);
 		const chosen = resolveModel(config, modelRuntime, task.role, task.private);
-		const background = task.role === "main" && !task.private && config.background ? modelRuntime.getModel(config.background.provider, config.background.modelId) : undefined;
+		const background = task.role === "main" && !task.private ? getBackgroundModel(config, modelRuntime) : undefined;
 		const { model, label, note } = background ? { model: background, label: `background ${background.id}`, note: undefined } : chosen;
 		update({ model: label });
 		const out = bufferedChannel();

@@ -7,6 +7,8 @@ import { createDecider, type Decider, decisionLogPath, type Transport } from "..
 import { Auth, FULL_SCOPES } from "../lib/auth.ts";
 import { Api, type Ctx } from "../lib/http.ts";
 import type { Io } from "../lib/util.ts";
+import { DatabaseSync } from "node:sqlite";
+import googleCapture from "../capture.ts";
 import { kbMatters, watch, type WatchState } from "../lib/watch.ts";
 
 const NOW = Date.parse("2026-11-24T15:00:00Z");
@@ -92,6 +94,7 @@ function setup(inbox: Msg[], opts: { threads?: Record<string, string[][]>; sent?
 	const statePath = join(dir, "google", "watch.json");
 	return {
 		dir,
+		io,
 		queries,
 		statePath,
 		state: () => JSON.parse(readFileSync(statePath, "utf8")) as WatchState,
@@ -124,8 +127,8 @@ const neverTransport: Transport = async () => {
 test("kbMatters reads every folder index, skipping missing summaries in the description", () => {
 	const h = setup([]);
 	assert.deepEqual(kbMatters(join(h.dir, "kb")), [
-		{ id: "travel/lisbon-may-2027", description: "Lisbon trip — May 2027: flights and hotel for Lisbon" },
-		{ id: "travel/old", description: "Old note" },
+		{ id: "travel/lisbon-may-2027", description: "Lisbon trip — May 2027: flights and hotel for Lisbon", path: "travel/lisbon-may-2027.md" },
+		{ id: "travel/old", description: "Old note", path: "travel/old.md" },
 	]);
 	assert.deepEqual(kbMatters(join(h.dir, "nowhere")), []);
 });
@@ -229,3 +232,85 @@ test("a failed decision fails open; no decision model at all fails the job", asy
 	await assert.rejects(down.run(down.decider(undefined)), /no decision model/);
 	assert.deepEqual(down.state().seen, {}, "state is not advanced when the job fails");
 });
+
+test("a confident remember is queued for background filing and not handed to the agent; an unsure one still is", async () => {
+	const h = setup([
+		{ id: "ship1", threadId: "ts", labels: ["INBOX"], from: "Hotel <stay@example.com>", subject: "Confirmation 123", snippet: "booked May 3" },
+		{ id: "maybe", threadId: "tm", labels: ["INBOX"], from: "p@example.com", subject: "fyi", snippet: "" },
+	]);
+	h.seed({});
+	const decider = h.decider(async (body) =>
+		(JSON.parse(body) as ParsedRequest).state.email.subject === "fyi" ? reply("remember", 0.5, ["none", 0.9]) : reply("remember", 0.9, ["travel/lisbon-may-2027", 0.9]),
+	);
+	const { out, err } = await h.run(decider);
+	assert.match(out, /maybe \| thread tm \| suggested: remember 0\.50 unsure/);
+	assert.doesNotMatch(out, /Confirmation 123/);
+	assert.match(err, /1 email queued for background filing/);
+	const db = new DatabaseSync(join(h.dir, "nano.sqlite"));
+	const rows = db.prepare("SELECT dedupe, payload, state FROM kb_capture").all() as { dedupe: string; payload: string; state: string }[];
+	db.close();
+	assert.equal(rows.length, 1);
+	assert.equal(rows[0]?.dedupe, "gmail:ship1");
+	const payload = JSON.parse(rows[0]?.payload ?? "{}");
+	assert.equal(payload.source, "gmail");
+	assert.equal(payload.messageId, "ship1");
+	assert.equal(payload.matter, "travel/lisbon-may-2027.md");
+	assert.deepEqual(h.state().threads.ts, { handle: "remember", at: NOW });
+
+	const only = setup([{ id: "r", threadId: "tr", labels: ["INBOX"], from: "p@example.com", subject: "Order shipped", snippet: "" }]);
+	only.seed({});
+	assert.equal((await only.run(only.decider(async () => reply("remember", 0.9, ["none", 0.9])))).out, "", "a run with only filed mail starts no agent");
+
+	const disabled = setup([{ id: "r2", threadId: "tr2", labels: ["INBOX"], from: "p@example.com", subject: "Order shipped", snippet: "" }]);
+	disabled.io.env.NANO_CAPTURE = "OFF";
+	disabled.seed({});
+	assert.match((await disabled.run(disabled.decider(async () => reply("remember", 0.9, ["none", 0.9])))).out, /Order shipped/, "NANO_CAPTURE=OFF hands remember mail to the agent");
+});
+
+test("googleCapture gmail_read reads allowed message ids, softens 404, and rethrows transient errors", async () => {
+	const dir = mkdtempSync(join(tmpdir(), "nano-gcap-"));
+	mkdirSync(join(dir, "google"), { recursive: true });
+	writeFileSync(
+		join(dir, "google", "token.json"),
+		JSON.stringify({ type: "authorized_user", client_id: "cid", client_secret: "cs", refresh_token: "rt", token: "at", expiry: new Date(NOW + 3_600_000).toISOString(), scopes: FULL_SCOPES }),
+	);
+	let mode: "ok" | "404" | "503" = "ok";
+	const seenIds: string[] = [];
+	const ioFactory = (): Io => ({
+		env: { TZ: "America/New_York" },
+		fetch: (async (input: string | URL | Request) => {
+			const url = new URL(String(input));
+			const id = /\/messages\/([^/]+)$/.exec(url.pathname)?.[1];
+			if (id) seenIds.push(id);
+			if (mode === "404") return new Response(JSON.stringify({ error: { message: "not found" } }), { status: 404 });
+			if (mode === "503") return new Response(JSON.stringify({ error: { message: "unavailable" } }), { status: 503 });
+			return new Response(JSON.stringify({
+				id, threadId: "t1", labelIds: ["INBOX"], internalDate: String(NOW),
+				payload: { headers: [{ name: "From", value: "a@example.com" }, { name: "Subject", value: `Subj ${id}` }], mimeType: "text/plain", body: { data: Buffer.from(`Body ${id}`).toString("base64url") } },
+			}), { status: 200 });
+		}) as typeof fetch,
+		out: () => {},
+		err: () => {},
+		stdin: async () => "",
+		now: () => NOW,
+		sleep: async () => {},
+	});
+	const source = googleCapture({ config: { dataDir: dir }, io: ioFactory }).gmail!;
+	assert.deepEqual(source.tools({ messageId: "-badflag" }), [], "leading dash is rejected");
+	assert.deepEqual(source.tools({ messageId: "short" }), [], "short id is rejected");
+
+	const [tool] = source.tools({ messageId: "msg111111", messageIds: ["msg000000", "msg111111"] });
+	assert.ok(tool);
+	const okText = await tool.run({}, new AbortController().signal);
+	assert.match(okText, /Body msg000000/);
+	assert.match(okText, /Body msg111111/);
+	assert.deepEqual(seenIds, ["msg000000", "msg111111"]);
+
+	mode = "404";
+	const missingText = await tool.run({}, new AbortController().signal);
+	assert.match(missingText, /could not be read: Not found \(HTTP 404\)/);
+
+	mode = "503";
+	await assert.rejects(() => tool.run({}, new AbortController().signal), /Google API error 503/);
+});
+

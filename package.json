@@ -7,7 +7,7 @@
   "engines": { "node": ">=24" },
   "scripts": {
     "start": "node src/index.ts",
-    "postinstall": "node patches/spectrum-imessage-revisions.mjs",
+    "postinstall": "node patches/spectrum-imessage-revisions.mjs && node patches/spectrum-imessage-send-ids.mjs",
     "typecheck": "tsc --noEmit",
     "test": "node --test test/*.test.ts packs/*/test/*.test.ts packs/*/test/*.test.mjs"
   },

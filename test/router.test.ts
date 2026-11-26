@@ -211,3 +211,76 @@ test("a lasting fact gets a note to save it, and a message about a running task 
 	assert.equal(await nano.next(), "Restarting it with the new budget.");
 	await nano.conversation.dispose();
 });
+
+test("with background filing, a lasting fact is queued, the turn is told not to write it, and it is released when the turn ends", async () => {
+	const decider = fakeDecisionModel({ "I'm vegetarian now": { remember: ["yes", 0.93] }, "thanks, and I moved to Lisbon": { remember: ["yes", 0.93], reply: ["none", 0.97] } });
+	const queued: { payload: { source: string; text?: string }; dedupe: string; dueAt?: number }[] = [];
+	const released: string[] = [];
+	const capture = {
+		enqueue: (payload: { source: string; text?: string }, options: { dedupe: string; dueAt?: number }) => (queued.push({ payload, ...options }), true),
+		release: (dedupe: string) => void released.push(dedupe),
+		status: () => (released.length ? "Background knowledge-base filing in the last 30 minutes: 1 filed (people/owner.md)." : undefined),
+	};
+	const nano = await scriptedConversation({ packs: "core", decisionTransport: decider.transport, env: { NANO_OWNER: "stdin" }, capture });
+	nano.script([
+		(context) => {
+			const last = JSON.stringify(context.messages.at(-1));
+			assert.match(last, /A background filer will save it/);
+			assert.doesNotMatch(last, /save it to the right knowledge base note/);
+			assert.equal(released.length, 0, "held until the turn ends");
+			return fauxAssistantMessage(fauxText("Noted."));
+		},
+	]);
+	nano.say("I'm vegetarian now");
+	assert.equal(await nano.next(), "Noted.");
+	await settle();
+	assert.equal(queued.length, 1);
+	assert.equal(queued[0]?.payload.source, "owner");
+	assert.equal(queued[0]?.payload.text, "I'm vegetarian now");
+	assert.ok((queued[0]?.dueAt ?? 0) > Date.now() + 60_000, "held for the turn");
+	assert.deepEqual(released, [queued[0]?.dedupe]);
+
+	nano.say("thanks, and I moved to Lisbon");
+	await settle();
+	assert.equal(queued.length, 2, "a no-reply message is still filed");
+	assert.ok((queued[1]?.dueAt ?? Infinity) <= Date.now(), "and right away");
+
+	nano.script([
+		(context) => {
+			assert.match(JSON.stringify(context.messages.at(-1)), /1 filed \(people\/owner.md\)/);
+			return fauxAssistantMessage(fauxText("Yes, saved."));
+		},
+	]);
+	nano.say("did you save that?");
+	assert.equal(await nano.next(), "Yes, saved.");
+	await nano.conversation.dispose();
+});
+
+test("a conversation that is not the owner's never feeds the filer, and normalized owner ids still match", async () => {
+	const decider = fakeDecisionModel({ "I'm vegetarian now": { remember: ["yes", 0.93] } });
+	const queued: unknown[] = [];
+	const capture = { enqueue: (p: unknown) => (queued.push(p), true), release: () => {}, status: () => undefined };
+	const nano = await scriptedConversation({ packs: "core", decisionTransport: decider.transport, env: { NANO_OWNER: "+15550100" }, capture });
+	nano.script([
+		(context) => {
+			assert.match(JSON.stringify(context.messages.at(-1)), /save it to the right knowledge base note/);
+			return fauxAssistantMessage(fauxText("Noted."));
+		},
+	]);
+	nano.say("I'm vegetarian now");
+	assert.equal(await nano.next(), "Noted.");
+	assert.equal(queued.length, 0);
+	await nano.conversation.dispose();
+
+	const mixedCase = await scriptedConversation({ packs: "core", decisionTransport: decider.transport, env: { NANO_OWNER: "STDIN" }, capture });
+	mixedCase.script([
+		(context) => {
+			assert.match(JSON.stringify(context.messages.at(-1)), /A background filer will save it/);
+			return fauxAssistantMessage(fauxText("Noted."));
+		},
+	]);
+	mixedCase.say("I'm vegetarian now");
+	assert.equal(await mixedCase.next(), "Noted.");
+	assert.equal(queued.length, 1);
+	await mixedCase.conversation.dispose();
+});

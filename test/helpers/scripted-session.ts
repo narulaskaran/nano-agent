@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { type FauxResponseStep, fauxProvider } from "@earendil-works/pi-ai";
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";
-import { Conversation, StateStore } from "../../src/agent.ts";
+import { Conversation, type ConversationOptions, StateStore } from "../../src/agent.ts";
 import type { Channel } from "../../src/channel.ts";
 import { type Config, loadConfig } from "../../src/config.ts";
 import type { Transport } from "../../src/decide.ts";
@@ -22,7 +22,7 @@ export function toolResults(context: { messages: readonly unknown[] }): string[]
  * A Nano conversation as the stdin channel runs it, with a scripted model instead of a real one.
  * Replies the agent sends are collected in `sent`; `next()` resolves with the next one.
  */
-export async function scriptedConversation(options: { packs: string; env?: Record<string, string>; dataDir?: string; tokensPerSecond?: number; decisionTransport?: Transport; reasoning?: boolean }) {
+export async function scriptedConversation(options: { packs: string; env?: Record<string, string>; dataDir?: string; tokensPerSecond?: number; decisionTransport?: Transport; reasoning?: boolean; capture?: ConversationOptions["capture"]; outbound?: ConversationOptions["outbound"] }) {
 	const dataDir = options.dataDir ?? mkdtempSync(join(tmpdir(), "nano-test-"));
 	const faux = fauxProvider({ provider: "faux", models: [{ id: "scripted", reasoning: options.reasoning }], tokensPerSecond: options.tokensPerSecond });
 	const config: Config = loadConfig({
@@ -61,6 +61,8 @@ export async function scriptedConversation(options: { packs: string; env?: Recor
 	});
 	const conversation = new Conversation("stdin", config, channel, new StateStore(dataDir), runtime, scheduler, tasks, {
 		decider: options.decisionTransport ? testDecider(dataDir, options.decisionTransport) : undefined,
+		capture: options.capture,
+		outbound: options.outbound,
 	});
 	return {
 		config,

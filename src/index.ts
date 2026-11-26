@@ -1,14 +1,17 @@
 import { join } from "node:path";
 import { Conversation, StateStore } from "./agent.ts";
+import { type Compose, createCapture } from "./capture.ts";
 import { composeWith } from "./compose.ts";
 import { createDecider, decisionTransport } from "./decide.ts";
 import { type Channel, createPhotonChannel, createStdinChannel } from "./channel.ts";
-import { currentTimezone, loadConfig, startTimezoneSync } from "./config.ts";
-import { completeText, createModelRuntime, getMainModel, localProviderId } from "./models.ts";
+import { currentTimezone, loadConfig, localDate, startTimezoneSync } from "./config.ts";
+import { completeText, createModelRuntime, getBackgroundModel, getMainModel, localProviderId } from "./models.ts";
+import { createOutbound } from "./outbound.ts";
 import { refreshProviderSettings } from "./provider-settings.ts";
-import { extendPath, skillPaths, startPackServices } from "./packs.ts";
+import { extendPath, packCaptureSources, skillPaths, startPackServices } from "./packs.ts";
 import { profileExists } from "./prompt.ts";
 import { providerFetch } from "./provider-client.ts";
+import { openQueueDb } from "./queue.ts";
 import { Scheduler } from "./scheduler.ts";
 import { TaskManager } from "./tasks.ts";
 import { createWorkerRunner } from "./worker.ts";
@@ -56,8 +59,22 @@ async function main(): Promise<void> {
 	const decider = createDecider({ dataDir: config.dataDir, transport: decisionTransport() });
 	const store = new StateStore(config.dataDir);
 	const conversations = new Map<string, Conversation>();
+	// Durable queues (queue.ts): owner messages sent outside a reply, and background knowledge-base filing.
+	const db = openQueueDb(config.dataDir);
+	const outbound = createOutbound({ db, channel, delivered: (spaceId, text) => conversation(spaceId).delivered(text) });
+	const compose: Compose = async (system, user, signal, options) => {
+		await refreshProviderSettings(config, modelRuntime);
+		const main = getMainModel(config, modelRuntime);
+		const composer = (options?.role === "background" ? getBackgroundModel(config, modelRuntime) : undefined) ?? main;
+		if (!composer) throw new Error("The main model is unavailable");
+		if (options?.tools?.length) return composeWith((context, abort) => modelRuntime.completeSimple(composer, context, { signal: abort }), system, user, signal, options);
+		const reply = await completeText(modelRuntime, composer, system, [user], { signal });
+		if (reply.error) throw new Error(reply.error);
+		return reply.text;
+	};
+	const capture = createCapture({ db, kbDir: config.kbDir, dataDir: config.dataDir, compose, sources: await packCaptureSources(config), today: () => localDate(config) });
 	const scheduler: Scheduler = new Scheduler(config, {
-		send: (spaceId, text) => conversation(spaceId).deliver(text),
+		send: (spaceId, text, dedupe) => conversation(spaceId).deliver(text, dedupe),
 		task: (spaceId, prompt) => conversation(spaceId).inject(prompt),
 		background: async (spaceId, work) => {
 			tasks.start({
@@ -83,7 +100,11 @@ async function main(): Promise<void> {
 	function conversation(spaceId: string): Conversation {
 		let c = conversations.get(spaceId);
 		if (!c) {
-			c = new Conversation(spaceId, config, channel, store, modelRuntime, scheduler, tasks, { decider });
+			c = new Conversation(spaceId, config, channel, store, modelRuntime, scheduler, tasks, {
+				decider,
+				outbound: outbound.send,
+				capture: config.capture ? capture : undefined,
+			});
 			conversations.set(spaceId, c);
 		}
 		return c;
@@ -91,6 +112,8 @@ async function main(): Promise<void> {
 
 	let stopping = false;
 	const packServices = new AbortController();
+	const queues = new AbortController();
+	const queueRuns: Promise<void>[] = [];
 	const shutdown = async (signal: string) => {
 		if (stopping) return;
 		stopping = true;
@@ -98,7 +121,13 @@ async function main(): Promise<void> {
 		packServices.abort();
 		scheduler.stop();
 		tasks.stop();
+		// Sends in flight get a few seconds to finish before the channel closes; the rest wait in the queue for the restart.
+		queues.abort();
+		await Promise.allSettled(queueRuns);
 		await Promise.allSettled([...conversations.values()].map((c) => c.dispose()));
+		try {
+			db.close();
+		} catch {}
 		await channel.stop().catch(() => {});
 		process.exit(0);
 	};
@@ -106,22 +135,18 @@ async function main(): Promise<void> {
 	process.on("SIGTERM", () => void shutdown("SIGTERM"));
 
 	startTimezoneSync(process.env.NANO_TZ_URL);
+	queueRuns.push(
+		outbound.run(queues.signal).catch((error) => console.error("nano: outbound queue stopped:", error)),
+		capture.run(queues.signal).catch((error) => console.error("nano: capture queue stopped:", error)),
+	);
 	scheduler.start();
 	void tasks.reportLost();
 	void startPackServices({
 		config,
 		decider,
 		signal: packServices.signal,
-		notifyOwner: (text) => conversation(config.owner).deliver(text),
-		compose: async (system, user, signal, options) => {
-			await refreshProviderSettings(config, modelRuntime);
-			const composer = getMainModel(config, modelRuntime);
-			if (!composer) throw new Error("The main model is unavailable");
-			if (options?.tools?.length) return composeWith((context, abort) => modelRuntime.completeSimple(composer, context, { signal: abort }), system, user, signal, options);
-			const reply = await completeText(modelRuntime, composer, system, [user], { signal });
-			if (reply.error) throw new Error(reply.error);
-			return reply.text;
-		},
+		notifyOwner: (text, options) => conversation(config.owner).deliver(text, options?.dedupe),
+		compose,
 	});
 	console.error(`nano: listening on ${config.channel}, ${scheduler.list().length} scheduled job(s), up to ${config.maxTasks} background task(s)`);
 	await channel.start((message) => conversation(message.spaceId).receive(message));

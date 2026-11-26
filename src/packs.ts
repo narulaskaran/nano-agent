@@ -4,6 +4,7 @@ import { pathToFileURL } from "node:url";
 import type { ExtensionFactory } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import type { Channel } from "./channel.ts";
+import type { CaptureSource } from "./capture.ts";
 import type { ComposeOptions } from "./compose.ts";
 import type { Config } from "./config.ts";
 import type { Decider } from "./decide.ts";
@@ -15,6 +16,7 @@ import type { Scheduler } from "./scheduler.ts";
  *   <pack>/skills/<skill>/SKILL.md   Agent Skills, advertised to the model
  *   <pack>/extension.ts              optional: default export (ctx) => ExtensionFactory | ExtensionFactory[]
  *   <pack>/service.ts                optional: one background service for the Nano process
+ *   <pack>/capture.ts                optional: tools lent to the background KB filer for this pack's items (capture.ts)
  *   <pack>/bin/                      optional: commands put on PATH for the agent's shell
  *   <pack>/install.sh                optional: run as root when the image is built (repo packs only)
  *   <pack>/start-root.sh             optional: run as root at container start, before privileges drop (repo packs only)
@@ -45,11 +47,15 @@ export interface PackServiceContext {
 	config: Config;
 	decider: Decider;
 	signal: AbortSignal;
-	notifyOwner: (text: string) => Promise<void>;
 	/**
-	 * One completion on the main model with the given system prompt: no owner profile or memory, no conversation, and no
-	 * tools except the ones the caller lends in `options.tools` (see compose.ts). For text written to third parties, which
-	 * must not carry the owner's context.
+	 * Queue a message to the owner for durable delivery (outbound.ts). Resolves once it is queued. A repeated `dedupe`
+	 * is ignored, so a pack that crashed before recording its own progress does not notify twice.
+	 */
+	notifyOwner: (text: string, options?: { dedupe?: string }) => Promise<void>;
+	/**
+	 * One completion on the main model (or the background model, with `options.role`) with the given system prompt: no
+	 * owner profile or memory, no conversation, and no tools except the ones the caller lends in `options.tools` (see
+	 * compose.ts). For text written to third parties, which must not carry the owner's context.
 	 */
 	compose: (system: string, user: string, signal: AbortSignal, options?: ComposeOptions) => Promise<string>;
 }
@@ -65,6 +71,26 @@ export async function startPackServices(ctx: PackServiceContext): Promise<void> 
 			if (!ctx.signal.aborted) console.error(`nano: pack service ${file} stopped:`, (error as Error)?.message ?? error);
 		}
 	}));
+}
+
+/**
+ * Tools packs lend the background filer (capture.ts) for items from their own source: `<pack>/capture.ts` default-exports
+ * a function returning `{ <source>: CaptureSource }`.
+ */
+export async function packCaptureSources(config: Config): Promise<Record<string, CaptureSource>> {
+	const sources: Record<string, CaptureSource> = {};
+	for (const dir of packDirs(config)) {
+		const file = join(dir, "capture.ts");
+		if (!existsSync(file)) continue;
+		try {
+			const module = (await import(pathToFileURL(file).href)) as { default?: (ctx: { config: Config }) => Record<string, CaptureSource> };
+			if (typeof module.default !== "function") throw new Error("capture.ts has no default export function");
+			Object.assign(sources, module.default({ config }));
+		} catch (error) {
+			console.error(`nano: pack capture tools ${file} failed to load:`, (error as Error)?.message ?? error);
+		}
+	}
+	return sources;
 }
 
 /** Missing packs already reported. One line per pack per process, not per message. */
