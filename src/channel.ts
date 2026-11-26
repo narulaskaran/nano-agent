@@ -30,6 +30,16 @@ export interface Inbound {
 /** What `normalizeInbound` makes of one message: its text still in parts. */
 export type NormalizedInbound = Pick<Inbound, "files" | "revision"> & { text: string[] };
 
+/** The E.164 phone number from a direct-chat space id (`+1555…` or `any;-;+1555…`), or undefined. */
+export function phoneFromSpace(spaceId: string): string | undefined {
+	return /^(?:any;-;)?(\+\d{6,})$/.exec(spaceId)?.[1];
+}
+
+/** Canonical lowercase key for a space id, so `any;-;+1555…`, `+1555…`, and mixed-case handles compare equal. */
+export function normalizeSpaceId(spaceId: string): string {
+	return (phoneFromSpace(spaceId) ?? spaceId).toLowerCase();
+}
+
 /** The id of the message a part belongs to: flattened multi-part messages give each part an id of `p:<index>/<id>`. */
 export function baseMessageId(id: string): string {
 	return id.replace(/^p:\d+\//, "");
@@ -323,7 +333,7 @@ export async function createPhotonChannel(config: Config): Promise<Channel> {
 		const cached = spaces.get(spaceId);
 		if (cached) return cached;
 		const im = imessage(app as never) as AnySpace;
-		const phone = /^(?:any;-;)?(\+\d{6,})$/.exec(spaceId)?.[1];
+		const phone = phoneFromSpace(spaceId);
 		const space = phone ? await im.space.create(phone) : await im.space.get(spaceId);
 		if (!space) throw new Error(`cannot resolve conversation ${spaceId}`);
 		spaces.set(spaceId, space);
@@ -366,7 +376,7 @@ export async function createPhotonChannel(config: Config): Promise<Channel> {
 						}
 						// A direct chat is keyed by the phone number, the same id proactive sends use.
 						const rawSpaceId = String(space.id ?? message.space?.id ?? senderId);
-						const spaceId = /^any;-;(\+\d{6,})$/.exec(rawSpaceId)?.[1] ?? rawSpaceId;
+						const spaceId = phoneFromSpace(rawSpaceId) ?? rawSpaceId;
 						spaces.set(spaceId, space);
 						const out: NormalizedInbound = { text: [], files: [] };
 						await normalizeInbound(message.content, out, (content) => saveBinary(content, messageId));

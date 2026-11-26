@@ -256,7 +256,7 @@ test("with background filing, a lasting fact is queued, the turn is told not to 
 	await nano.conversation.dispose();
 });
 
-test("a conversation that is not the owner's never feeds the filer", async () => {
+test("a conversation that is not the owner's never feeds the filer, and normalized owner ids still match", async () => {
 	const decider = fakeDecisionModel({ "I'm vegetarian now": { remember: ["yes", 0.93] } });
 	const queued: unknown[] = [];
 	const capture = { enqueue: (p: unknown) => (queued.push(p), true), release: () => {}, status: () => undefined };
@@ -271,4 +271,16 @@ test("a conversation that is not the owner's never feeds the filer", async () =>
 	assert.equal(await nano.next(), "Noted.");
 	assert.equal(queued.length, 0);
 	await nano.conversation.dispose();
+
+	const mixedCase = await scriptedConversation({ packs: "core", decisionTransport: decider.transport, env: { NANO_OWNER: "STDIN" }, capture });
+	mixedCase.script([
+		(context) => {
+			assert.match(JSON.stringify(context.messages.at(-1)), /A background filer will save it/);
+			return fauxAssistantMessage(fauxText("Noted."));
+		},
+	]);
+	mixedCase.say("I'm vegetarian now");
+	assert.equal(await mixedCase.next(), "Noted.");
+	assert.equal(queued.length, 1);
+	await mixedCase.conversation.dispose();
 });

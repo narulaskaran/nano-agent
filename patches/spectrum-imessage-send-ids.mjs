@@ -16,6 +16,7 @@
  */
 import { readFileSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 
 export const PATCHED_VERSION = "12.16.0";
 const MARKER = "// nano patch: client message ids";
@@ -61,7 +62,7 @@ export function patchSpectrumSendIds(nodeModules) {
 	return "patched";
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
 	const nodeModules = resolve(process.argv[2] ?? "node_modules");
 	console.log(`@spectrum-ts/imessage: ${patchSpectrumSendIds(nodeModules)}`);
 }

@@ -35,6 +35,8 @@ export interface Config {
 	inbound: (typeof INBOUND_MODES)[number];
 	/** Route each owner message with a decision first (router.ts). Off when no decision model is configured. */
 	router: boolean;
+	/** File lasting facts in the background (capture.ts). Off falls back to main-turn hints / Gmail agent handoff. */
+	capture: boolean;
 	/** The router may start a fresh context window for a new topic only after this many quiet minutes. */
 	topicIdleMinutes: number;
 	dataDir: string;
@@ -85,6 +87,10 @@ export function loadLocalModel(env: NodeJS.ProcessEnv = process.env): LocalModel
 	return { modelId, baseUrl, apiKey: env.NANO_LOCAL_API_KEY || undefined, contextWindow: Number(env.NANO_LOCAL_CONTEXT || DEFAULT_LOCAL_CONTEXT) };
 }
 
+function flagEnabled(value: string | undefined): boolean {
+	return !/^(off|0|false|no)$/i.test(value?.trim() ?? "");
+}
+
 function list(value: string | undefined): string[] {
 	return (value ?? "")
 		.split(",")
@@ -112,7 +118,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
 		openRouterProviders: list(env.NANO_OPENROUTER_PROVIDERS),
 		idleHours: Number(env.NANO_IDLE_HOURS ?? 4),
 		inbound: (env.NANO_INBOUND?.trim().toLowerCase() || "interrupt") as Config["inbound"],
-		router: !/^(off|0|false|no)$/i.test(env.NANO_ROUTER?.trim() ?? ""),
+		router: flagEnabled(env.NANO_ROUTER),
+		capture: flagEnabled(env.NANO_CAPTURE),
 		topicIdleMinutes: Math.max(0, Number(env.NANO_TOPIC_IDLE_MINUTES ?? 20)),
 		dataDir,
 		kbDir: resolve(env.NANO_KB_DIR ?? join(dataDir, "kb")),
@@ -242,4 +249,9 @@ export function currentTimezone(config: Config): string {
 
 export function localStamp(config: Config, at: Date = new Date()): string {
 	return localStampFormatter(currentTimezone(config)).format(at);
+}
+
+/** YYYY-MM-DD in the owner's current timezone. */
+export function localDate(config: Config, at: Date | number = Date.now()): string {
+	return new Intl.DateTimeFormat("en-CA", { timeZone: currentTimezone(config) }).format(at);
 }

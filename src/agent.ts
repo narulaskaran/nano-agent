@@ -3,8 +3,8 @@ import { appendFileSync, existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import type { AgentSession, ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
-import { baseMessageId, type Channel, clip, type Inbound, type Revision } from "./channel.ts";
-import { type Config, currentTimezone, localStamp } from "./config.ts";
+import { baseMessageId, type Channel, clip, type Inbound, normalizeSpaceId, type Revision } from "./channel.ts";
+import { type Config, currentTimezone, localDate, localStamp } from "./config.ts";
 import { createDecider, type Decider, logDecisionEvent } from "./decide.ts";
 import { readJsonFile, writeJsonFile } from "./json-store.ts";
 import { getMainModel } from "./models.ts";
@@ -170,6 +170,8 @@ interface RunState {
 	interrupted: boolean;
 	/** The cancel has been sent. */
 	aborted: boolean;
+	/** Dedupe keys of steered capture items waiting for this turn to end. */
+	captures: string[];
 }
 
 /** How many notes made before the session exists are kept for it. */
@@ -233,7 +235,7 @@ export class Conversation {
 		this.decider = config.router ? (options.decider ?? createDecider({ dataDir: config.dataDir })) : undefined;
 		this.outbound = options.outbound;
 		// Only the owner's own conversation feeds the owner's knowledge base.
-		this.capture = spaceId === config.owner ? options.capture : undefined;
+		this.capture = config.owner && normalizeSpaceId(spaceId) === normalizeSpaceId(config.owner) ? options.capture : undefined;
 		this.config = config;
 		this.channel = channel;
 		this.store = store;
@@ -449,7 +451,8 @@ export class Conversation {
 			return;
 		}
 		if (streaming && this.config.inbound === "steer" && run.phase !== "done") {
-			void this.session?.steer(this.stamp(spoken), images).catch((error) => this.fail(error));
+			if (work.capture) run.captures.push(work.capture);
+			void this.session?.steer(this.stamp(spoken) + this.routerNotes(work), images).catch((error) => this.fail(error));
 			return;
 		}
 		void this.queue.push(work);
@@ -461,7 +464,7 @@ export class Conversation {
 	}
 
 	private async turn(batch: Work[]): Promise<void> {
-		const run: RunState = { from: batch[0]?.from ?? "system", phase: "setup", interrupted: false, aborted: false };
+		const run: RunState = { from: batch[0]?.from ?? "system", phase: "setup", interrupted: false, aborted: false, captures: [] };
 		this.run = run;
 		const typing = setInterval(() => void this.channel.typing(this.spaceId, true), TYPING_REFRESH_MS);
 		void this.channel.typing(this.spaceId, true);
@@ -494,6 +497,7 @@ export class Conversation {
 		} finally {
 			this.run = undefined;
 			for (const w of batch) if (w.from === "owner" && w.capture) this.capture?.release(w.capture);
+			for (const dedupe of run.captures) this.capture?.release(dedupe);
 			clearInterval(typing);
 			void this.channel.typing(this.spaceId, false);
 			this.state.sessionFile = this.session?.sessionFile ?? this.state.sessionFile;
@@ -635,7 +639,7 @@ export class Conversation {
 		if (this.state.recent.length > RECENT_KEEP) this.state.recent.splice(0, this.state.recent.length - RECENT_KEEP);
 		this.store.save();
 		const tz = currentTimezone(this.config);
-		const day = new Intl.DateTimeFormat("en-CA", { timeZone: tz }).format(at);
+		const day = localDate(this.config, at);
 		const time = new Intl.DateTimeFormat("en-GB", { timeZone: tz, hour: "2-digit", minute: "2-digit" }).format(at);
 		appendFileSync(join(this.config.dataDir, "log", `${day}.md`), `- ${time} **${role}**: ${text.replace(/\n/g, "\n  ")}\n`);
 	}

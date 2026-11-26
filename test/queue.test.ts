@@ -174,6 +174,8 @@ test("outbound keys, error classes and the retry window", () => {
 	assert.equal(isDefiniteSendFailure(Object.assign(new Error("x"), { name: "NotFoundError" })), true);
 	assert.equal(isDefiniteSendFailure(new Error("cannot resolve conversation abc")), true);
 	assert.equal(isDefiniteSendFailure(Object.assign(new Error("deadline"), { code: "timeout" })), false);
+	assert.equal(isDefiniteSendFailure(Object.assign(new Error("expired"), { name: "AuthenticationError", code: "tokenExpired" })), false);
+	assert.equal(isDefiniteSendFailure(Object.assign(new Error("transient"), { name: "AuthenticationError", retryable: true })), false);
 	const job = (attempts: number, createdAt: number) => ({ id: 1, key: "k", dedupe: null, payload: null, attempts, createdAt, dueAt: 0 });
 	assert.equal(outboundRetry(job(1, 0), new Error("net"), 0), 2000);
 	assert.equal(outboundRetry(job(7, 0), new Error("net"), 0), 60_000);
@@ -236,4 +238,50 @@ test("outbound gives up at once on a definite failure and sends one notice, neve
 	await running;
 	assert.deepEqual(attempts, ["the reminder", "I couldn't deliver a message earlier: the reminder"]);
 	assert.equal(outbound.queue.pending(), 0);
+});
+
+test("corrupt payloads fail individually without killing the worker, and empty dedupe keys do not collide", async () => {
+	const db = new DatabaseSync(":memory:");
+	const ran: string[] = [];
+	const queue = createQueue<{ v: string }>({ db, table: "jobs", pollMs: 10, handler: async (job) => void ran.push(job.payload.v) });
+	db.prepare("INSERT INTO jobs (key, dedupe, payload, created_at, due_at) VALUES ('bad', NULL, '{not json', 1, 1)").run();
+	assert.equal(queue.enqueue({ key: "k", payload: { v: "first" }, dedupe: "" }), true);
+	assert.equal(queue.enqueue({ key: "k", payload: { v: "second" }, dedupe: "" }), true);
+	const stop = new AbortController();
+	const running = queue.run(stop.signal);
+	await until(() => ran.length === 2);
+	stop.abort();
+	await running;
+	assert.deepEqual(ran, ["first", "second"]);
+	const bad = db.prepare("SELECT state, error FROM jobs WHERE key = 'bad'").get() as { state: string; error: string };
+	assert.equal(bad.state, "failed");
+	assert.match(bad.error, /corrupt payload/);
+});
+
+test("a timed-out outbound send that resolves late does not double-record delivery", async () => {
+	const db = new DatabaseSync(":memory:");
+	const recorded: string[] = [];
+	let calls = 0;
+	let releaseFirst: (() => void) | undefined;
+	const outbound = createOutbound({
+		db,
+		timeoutMs: 30,
+		channel: {
+			async send() {
+				calls++;
+				if (calls === 1) await new Promise<void>((r) => { releaseFirst = r; });
+				else throw Object.assign(new Error("already processed with this client message ID"), { code: "internalError" });
+			},
+		},
+		delivered: (_spaceId, text) => void recorded.push(text),
+	});
+	outbound.send("+15550100", "once");
+	const stop = new AbortController();
+	const running = outbound.run(stop.signal);
+	await until(() => recorded.length === 1, 8000);
+	releaseFirst?.();
+	await sleep(50);
+	stop.abort();
+	await running;
+	assert.deepEqual(recorded, ["once"]);
 });

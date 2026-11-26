@@ -1,6 +1,6 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import type { DatabaseSync } from "node:sqlite";
-import type { Channel } from "./channel.ts";
+import { type Channel, normalizeSpaceId } from "./channel.ts";
 import { createQueue, type Job, type Queue } from "./queue.ts";
 
 /**
@@ -27,27 +27,30 @@ export const sendIds = new AsyncLocalStorage<{ clientMessageId: string }>();
 (globalThis as Record<symbol, unknown>)[Symbol.for("nano.sendIds")] = sendIds;
 
 /** The same chat written two ways (`any;-;+1555…` and `+1555…`) is one key, so its messages stay in order. */
-export function outboundKey(spaceId: string): string {
-	const phone = /^(?:any;-;)?(\+\d{6,})$/.exec(spaceId)?.[1];
-	return (phone ?? spaceId).toLowerCase();
-}
+export const outboundKey = normalizeSpaceId;
 
-/** Every code and name along an error's cause chain. */
-function errorCodes(error: unknown): string[] {
+/** Every code, name, and retryable flag along an error's cause chain. */
+function inspectError(error: unknown): { codes: string[]; retryable: boolean } {
 	const codes: string[] = [];
-	for (let e = error as { code?: unknown; name?: unknown; message?: unknown; cause?: unknown } | undefined, depth = 0; e && depth < 5; e = e.cause as typeof e, depth++) {
+	let retryable = false;
+	for (
+		let e = error as { code?: unknown; name?: unknown; message?: unknown; retryable?: unknown; cause?: unknown } | undefined, depth = 0;
+		e && depth < 5;
+		e = e.cause as typeof e, depth++
+	) {
+		if (e.retryable === true) retryable = true;
 		for (const value of [e.code, e.name]) if (typeof value === "string") codes.push(value);
 		if (typeof e.message === "string" && /cannot resolve conversation/.test(e.message)) codes.push("cannotResolve");
 		// What the live server actually answers for a repeated clientMessageId (seen 2026-11-26): code internalError,
 		// "[upstream] Operation already processed with this client message ID". The documented code is duplicateMessage.
 		if (typeof e.message === "string" && /already processed with this client message id/i.test(e.message)) codes.push("duplicateMessage");
 	}
-	return codes;
+	return { codes, retryable };
 }
 
 /** The server already has a message with this clientMessageId: the first attempt was delivered. */
 export function isDuplicateSend(error: unknown): boolean {
-	return errorCodes(error).includes("duplicateMessage");
+	return inspectError(error).codes.includes("duplicateMessage");
 }
 
 const DEFINITE = new Set([
@@ -57,7 +60,9 @@ const DEFINITE = new Set([
 
 /** An error a retry cannot fix. */
 export function isDefiniteSendFailure(error: unknown): boolean {
-	return errorCodes(error).some((code) => DEFINITE.has(code));
+	const { codes, retryable } = inspectError(error);
+	if (retryable || codes.includes("tokenExpired")) return false;
+	return codes.some((code) => DEFINITE.has(code));
 }
 
 export function outboundRetry(job: Job<unknown>, error: unknown, now: number): number | undefined {
@@ -88,7 +93,7 @@ export function createOutbound(options: {
 		timeoutMs: options.timeoutMs ?? 90_000,
 		now: options.now,
 		retry: outboundRetry,
-		async handler(job) {
+		async handler(job, signal) {
 			const { spaceId, text } = job.payload;
 			// Stable for this job across retries and restarts, and unique across database resets.
 			const clientMessageId = `nano-${job.createdAt.toString(36)}-${job.id}`;
@@ -100,6 +105,8 @@ export function createOutbound(options: {
 					throw error;
 				}
 			}
+			// If this attempt already timed out or shutdown aborted it, let the next attempt (or restart) record delivery once.
+			if (signal.aborted) return;
 			try {
 				await options.delivered?.(spaceId, text);
 			} catch (error) {

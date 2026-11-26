@@ -238,13 +238,14 @@ export async function watch(ctx: Ctx, argv: string[], decider?: Decider): Promis
 	);
 	// The owner's own messages, and senders the job skips (such as the agent's own address), are not news.
 	const skipFrom = new Set((values["skip-from"] ?? []).map((a) => a.trim().toLowerCase()));
-	const byThread = new Map<string, { message: Message; count: number }>();
+	const byThread = new Map<string, { message: Message; count: number; messages: Message[] }>();
 	for (const m of messages) {
 		if (m.labelIds?.includes("SENT") || m.labelIds?.includes("DRAFT") || skipFrom.has(emailOf(header(m.payload, "From")))) continue;
 		const entry = byThread.get(m.threadId);
-		if (!entry) byThread.set(m.threadId, { message: m, count: 1 });
+		if (!entry) byThread.set(m.threadId, { message: m, count: 1, messages: [m] });
 		else {
 			entry.count++;
+			entry.messages.push(m);
 			if (Number(m.internalDate ?? 0) > Number(entry.message.internalDate ?? 0)) entry.message = m;
 		}
 	}
@@ -312,15 +313,29 @@ export async function watch(ctx: Ctx, argv: string[], decider?: Decider): Promis
 	// When it cannot be queued it falls back to the agent, as before.
 	const filed = new Set<DecidedItem>();
 	const toFile = kept.filter((i) => i.handle === "remember" && i.p >= SURE_MIN && !i.error);
-	if (toFile.length > 0 && env.NANO_CAPTURE !== "off") {
+	const captureEnabled = !/^(off|0|false|no)$/i.test(env.NANO_CAPTURE?.trim() ?? "");
+	if (toFile.length > 0 && captureEnabled) {
 		try {
 			const db = openQueueDb(dataDir(env));
 			try {
 				for (const i of toFile) {
+					const threadMessages = byThread.get(i.m.threadId)?.messages ?? [i.m];
+					const sortedIds = [...threadMessages]
+						.sort((a, b) => Number(a.internalDate ?? 0) - Number(b.internalDate ?? 0))
+						.map((m) => m.id);
 					enqueueJob(db, CAPTURE_TABLE, {
 						key: `gmail:${i.m.id}`,
 						dedupe: `gmail:${i.m.id}`,
-						payload: { source: "gmail", messageId: i.m.id, from: i.from, subject: i.subject, date: i.date, snippet: oneLine(i.snippet, 300), matter: i.matter ? matterPaths.get(i.matter) : undefined },
+						payload: {
+							source: "gmail",
+							messageId: i.m.id,
+							...(sortedIds.length > 1 ? { messageIds: sortedIds } : {}),
+							from: i.from,
+							subject: i.subject,
+							date: i.date,
+							snippet: oneLine(i.snippet, 300),
+							matter: i.matter ? matterPaths.get(i.matter) : undefined,
+						},
 					}, now);
 					filed.add(i);
 				}

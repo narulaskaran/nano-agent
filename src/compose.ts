@@ -77,7 +77,8 @@ export async function composeWith(complete: Complete, system: string, user: stri
 					throw new ComposeToolError(`${call.name} failed: ${(error as Error).message}`);
 				}
 			}
-			const body = isError ? result : `${options.untrusted ?? UNTRUSTED}\n<<<\n${result.length > maxChars ? `${result.slice(0, maxChars)}\n[cut]` : result}\n>>>`;
+			const safe = result.replace(/<<<|>>>/g, (m) => m.split("").join(" "));
+			const body = isError ? result : `${options.untrusted ?? UNTRUSTED}\n<<<\n${safe.length > maxChars ? `${safe.slice(0, maxChars)}\n[cut]` : safe}\n>>>`;
 			messages.push({ role: "toolResult", toolCallId: call.id, toolName: call.name, content: [{ type: "text", text: body }], isError, timestamp: Date.now() });
 		}
 	}

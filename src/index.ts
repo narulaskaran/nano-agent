@@ -4,7 +4,7 @@ import { type Compose, createCapture } from "./capture.ts";
 import { composeWith } from "./compose.ts";
 import { createDecider, decisionTransport } from "./decide.ts";
 import { type Channel, createPhotonChannel, createStdinChannel } from "./channel.ts";
-import { currentTimezone, loadConfig, startTimezoneSync } from "./config.ts";
+import { currentTimezone, loadConfig, localDate, startTimezoneSync } from "./config.ts";
 import { completeText, createModelRuntime, getBackgroundModel, getMainModel, localProviderId } from "./models.ts";
 import { createOutbound } from "./outbound.ts";
 import { refreshProviderSettings } from "./provider-settings.ts";
@@ -72,7 +72,7 @@ async function main(): Promise<void> {
 		if (reply.error) throw new Error(reply.error);
 		return reply.text;
 	};
-	const capture = createCapture({ db, kbDir: config.kbDir, dataDir: config.dataDir, compose, sources: await packCaptureSources(config) });
+	const capture = createCapture({ db, kbDir: config.kbDir, dataDir: config.dataDir, compose, sources: await packCaptureSources(config), today: () => localDate(config) });
 	const scheduler: Scheduler = new Scheduler(config, {
 		send: (spaceId, text, dedupe) => conversation(spaceId).deliver(text, dedupe),
 		task: (spaceId, prompt) => conversation(spaceId).inject(prompt),
@@ -100,7 +100,11 @@ async function main(): Promise<void> {
 	function conversation(spaceId: string): Conversation {
 		let c = conversations.get(spaceId);
 		if (!c) {
-			c = new Conversation(spaceId, config, channel, store, modelRuntime, scheduler, tasks, { decider, outbound: outbound.send, capture });
+			c = new Conversation(spaceId, config, channel, store, modelRuntime, scheduler, tasks, {
+				decider,
+				outbound: outbound.send,
+				capture: config.capture ? capture : undefined,
+			});
 			conversations.set(spaceId, c);
 		}
 		return c;
@@ -121,6 +125,9 @@ async function main(): Promise<void> {
 		queues.abort();
 		await Promise.allSettled(queueRuns);
 		await Promise.allSettled([...conversations.values()].map((c) => c.dispose()));
+		try {
+			db.close();
+		} catch {}
 		await channel.stop().catch(() => {});
 		process.exit(0);
 	};
