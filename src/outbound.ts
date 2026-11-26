@@ -38,6 +38,9 @@ function errorCodes(error: unknown): string[] {
 	for (let e = error as { code?: unknown; name?: unknown; message?: unknown; cause?: unknown } | undefined, depth = 0; e && depth < 5; e = e.cause as typeof e, depth++) {
 		for (const value of [e.code, e.name]) if (typeof value === "string") codes.push(value);
 		if (typeof e.message === "string" && /cannot resolve conversation/.test(e.message)) codes.push("cannotResolve");
+		// What the live server actually answers for a repeated clientMessageId (seen 2026-11-26): code internalError,
+		// "[upstream] Operation already processed with this client message ID". The documented code is duplicateMessage.
+		if (typeof e.message === "string" && /already processed with this client message id/i.test(e.message)) codes.push("duplicateMessage");
 	}
 	return codes;
 }

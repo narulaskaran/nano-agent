@@ -154,3 +154,14 @@ test("a filer that keeps failing gives up quietly and says so in the status", as
 	assert.match(log[0].error, /model down/);
 	assert.match(capture.status(now - 30 * 60_000) ?? "", /1 failed/);
 });
+
+test("an unreadable note is skipped by search and reported by read, without failing the run", { skip: process.getuid?.() === 0 }, async () => {
+	const { dir } = kb();
+	const { chmodSync } = await import("node:fs");
+	writeFileSync(join(dir, "people", "locked.md"), "omnivore secret\n");
+	chmodSync(join(dir, "people", "locked.md"), 0o000);
+	const tools = kbTools(dir, []);
+	assert.match(await call(tools, "kb_search", { text: "omnivore" }), /people\/owner\.md/);
+	assert.match(await call(tools, "kb_read", { path: "people/locked.md" }), /cannot be used \(EACCES\)/);
+	chmodSync(join(dir, "people", "locked.md"), 0o600);
+});

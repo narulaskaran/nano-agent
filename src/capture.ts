@@ -99,7 +99,21 @@ export function kbTools(kbDir: string, changes: Change[]): ComposeTool[] {
 		return `Saved ${rel} (version ${sha(after)}).`;
 	};
 	const shaArg = { type: "string", description: "The version kb_read returned for this note" };
-	return [
+	// A file this process may not read or write (permissions, a folder named like a note) is the model's problem to route
+	// around, not a reason to abandon the whole filing run.
+	const tolerant = (tool: ComposeTool): ComposeTool => ({
+		...tool,
+		async run(args, signal) {
+			try {
+				return await tool.run(args, signal);
+			} catch (error) {
+				const code = (error as NodeJS.ErrnoException)?.code;
+				if (typeof code === "string" && /^E[A-Z]+$/.test(code)) return `That file cannot be used (${code}). Try another.`;
+				throw error;
+			}
+		},
+	});
+	const tools: ComposeTool[] = [
 		{
 			name: "kb_read",
 			description: "Read a Markdown file in the knowledge base. Returns its version, needed to change it.",
@@ -138,12 +152,23 @@ export function kbTools(kbDir: string, changes: Change[]): ComposeTool[] {
 				if (needle.length < 2) return "Give at least two characters.";
 				const hits: string[] = [];
 				const walk = (dir: string) => {
-					for (const e of readdirSync(dir, { withFileTypes: true })) {
+					let entries: import("node:fs").Dirent[];
+					try {
+						entries = readdirSync(dir, { withFileTypes: true });
+					} catch {
+						return; // a folder this process cannot read
+					}
+					for (const e of entries) {
 						if (hits.length >= SEARCH_HITS || e.name.startsWith(".") || e.name.startsWith("_")) continue;
 						const path = join(dir, e.name);
 						if (e.isDirectory()) walk(path);
 						else if (e.name.endsWith(".md")) {
-							const lines = readFileSync(path, "utf8").split("\n");
+							let lines: string[];
+							try {
+								lines = readFileSync(path, "utf8").split("\n");
+							} catch {
+								continue; // a note this process cannot read
+							}
 							for (const line of lines) {
 								if (hits.length >= SEARCH_HITS) break;
 								if (line.toLowerCase().includes(needle)) hits.push(`${relative(kbDir, path)}: ${line.trim().slice(0, 200)}`);
@@ -217,6 +242,7 @@ export function kbTools(kbDir: string, changes: Change[]): ComposeTool[] {
 			},
 		},
 	];
+	return tools.map(tolerant);
 }
 
 /** The item as the filer sees it. */
@@ -296,7 +322,7 @@ export function createCapture(options: {
 			let answer: string;
 			try {
 				answer = await options.compose(FILER_SYSTEM, describeItem(job.payload, today()), signal, {
-					tools, role: "background", maxRounds: 8, maxCalls: 14, maxResultChars: READ_CHARS + 200, untrusted: KB_DATA,
+					tools, role: "background", maxRounds: 16, maxCalls: 40, maxResultChars: READ_CHARS + 200, untrusted: KB_DATA,
 				});
 			} finally {
 				// Whatever was saved stays saved, even if the run then failed: record it so it can be checked or undone.

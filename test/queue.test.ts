@@ -169,6 +169,8 @@ test("outbound keys, error classes and the retry window", () => {
 	assert.equal(outboundKey("Owner@Example.com"), "owner@example.com");
 	assert.equal(isDuplicateSend({ code: "duplicateMessage" }), true);
 	assert.equal(isDuplicateSend(new Error("wrapped", { cause: { code: "duplicateMessage" } })), true);
+	assert.equal(isDuplicateSend(Object.assign(new Error("[upstream] Operation already processed with this client message ID"), { code: "internalError" })), true, "the live server's answer");
+	assert.equal(isDuplicateSend(Object.assign(new Error("[upstream] boom"), { code: "internalError" })), false);
 	assert.equal(isDefiniteSendFailure(Object.assign(new Error("x"), { name: "NotFoundError" })), true);
 	assert.equal(isDefiniteSendFailure(new Error("cannot resolve conversation abc")), true);
 	assert.equal(isDefiniteSendFailure(Object.assign(new Error("deadline"), { code: "timeout" })), false);
