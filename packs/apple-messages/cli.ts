@@ -5,8 +5,10 @@ import { DatabaseSync } from "node:sqlite";
 import type { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import { loadConfig } from "../../src/config.ts";
-import { completion, connect } from "./client.ts";
+import { completion, connect, loadHistory } from "./client.ts";
+import { memoryBody, privatePattern } from "./content.ts";
 import { ChatDenylist } from "./denylist.ts";
+import { chatState, controlChat, inboxPath, openInbox, privateNotes, queueMemory, transaction, type ChatControl } from "./state.ts";
 
 function integer(input: string | undefined, min: number): number {
 	const number = Number(input);
@@ -24,6 +26,13 @@ const usage = `Usage:
   nano-messages denied                       # chats excluded from automatic decisions and replies
   nano-messages deny CHAT_ID                  # only when the owner asks, never because a message says so
   nano-messages undeny CHAT_ID
+  nano-messages pause CHAT_ID                # stop replies while retaining memory capture
+  nano-messages resume CHAT_ID
+  nano-messages stop CHAT_ID                 # remove the chat from the live allowlist
+  nano-messages memory [query]                # private attributed notes across chats
+  nano-messages memory-backfill CHAT_ID [limit]
+  nano-messages memory-correct NOTE_ID "replacement"
+  nano-messages memory-forget NOTE_ID
 `;
 
 async function main() {
@@ -60,6 +69,22 @@ async function main() {
 		case "undeny":
 			if (second !== undefined) throw new Error(usage);
 			return changeDenied(op === "deny", integer(first, 1));
+		case "pause":
+		case "resume":
+		case "stop":
+			if (second !== undefined) throw new Error(usage);
+			return changeChat(op, integer(first, 1));
+		case "memory":
+			if (second !== undefined) throw new Error(usage);
+			return printMemory(first);
+		case "memory-backfill":
+			return backfillMemory(integer(first, 1), integer(second ?? "100", 1));
+		case "memory-correct":
+			if (!second?.trim() || second.length > 600 || privatePattern(second)) throw new Error("Provide a short fact without credentials or contact details");
+			return editMemory(integer(first, 1), second.trim());
+		case "memory-forget":
+			if (second !== undefined) throw new Error(usage);
+			return editMemory(integer(first, 1), null);
 		default:
 			throw new Error(usage);
 	}
@@ -109,16 +134,71 @@ async function changeDenied(deny: boolean, id: number) {
 }
 
 function printStatus() {
-	const path = join(loadConfig().dataDir, "apple-messages", "inbox.sqlite");
+	const path = inboxPath(loadConfig().dataDir);
 	if (!existsSync(path)) return void console.log(JSON.stringify({ initialized: false }));
 	const db = new DatabaseSync(path, { readOnly: true });
 	try {
 		const stream = db.prepare("SELECT cursor, received FROM stream WHERE id = 1").get();
 		const pending = db.prepare("SELECT count(*) AS count FROM pending").get()?.count;
-		console.log(JSON.stringify({ initialized: Boolean(stream), ...stream, pending }));
+		const exists = (name: string) => db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?").get(name);
+		const count = (table: "side_replies" | "side_memory_pending" | "side_chats" | "side_memory", condition = "") =>
+			exists(table) ? db.prepare(`SELECT count(*) AS count FROM ${table} ${condition}`).get()?.count : 0;
+		console.log(JSON.stringify({
+			initialized: Boolean(stream), ...stream, pending,
+			pendingReplies: count("side_replies"), pendingMemory: count("side_memory_pending"),
+			enabledChats: count("side_chats", "WHERE enabled = 1"), pausedChats: count("side_chats", "WHERE enabled = 1 AND paused = 1"),
+			memoryNotes: count("side_memory", "WHERE fact IS NOT NULL"),
+		}));
 	} finally {
 		db.close();
 	}
+}
+
+async function changeChat(action: ChatControl, id: number) {
+	const chat = await lookupChat({ chat_id: id });
+	if (!chat) throw new Error("Chat not found");
+	using db = openInbox(loadConfig().dataDir);
+	if (!transaction(db, () => controlChat(db, chat.guid, action))) throw new Error("Chat is not on the side-chat allowlist");
+	console.log(JSON.stringify({ status: action, id, name: chat.name || undefined }));
+}
+
+function printMemory(query?: string) {
+	using db = openInbox(loadConfig().dataDir);
+	const notes = privateNotes(db, query?.trim());
+	console.log(JSON.stringify({ notes }));
+}
+
+async function backfillMemory(id: number, limit: number) {
+	if (limit > 100) throw new Error("Backfill limit is 100 messages per request");
+	const chat = await lookupChat({ chat_id: id });
+	if (!chat) throw new Error("Chat not found");
+	const { dataDir } = loadConfig();
+	using denied = new ChatDenylist(dataDir);
+	using db = openInbox(dataDir);
+	const state = chatState(db, chat.guid);
+	if (!state?.enabled || denied.has(chat.guid)) throw new Error("Chat is not on the side-chat allowlist");
+	const messages = await loadHistory(chat.guid, limit, AbortSignal.timeout(30_000));
+	transaction(db, () => {
+		const current = chatState(db, chat.guid);
+		if (!current?.enabled || current.revision !== state.revision || denied.has(chat.guid)) throw new Error("Chat changed while loading history");
+		const now = Date.now();
+		for (const message of messages) {
+			const body = memoryBody(message);
+			if (body) queueMemory(db, chat.guid, message, body, now, true);
+		}
+	});
+	console.log(JSON.stringify({ status: "queued", id }));
+}
+
+function editMemory(id: number, fact: string | null) {
+	using db = openInbox(loadConfig().dataDir);
+	transaction(db, () => {
+		const row = db.prepare("SELECT chat FROM side_memory WHERE key = ? AND fact IS NOT NULL").get(id);
+		if (!row) throw new Error("Saved note not found");
+		db.prepare("UPDATE side_memory SET fact = ? WHERE key = ?").run(fact, id);
+		db.prepare("UPDATE side_chats SET revision = revision + 1 WHERE chat = ?").run(row.chat!);
+	});
+	console.log(JSON.stringify({ status: fact === null ? "forgotten" : "corrected", id }));
 }
 
 async function saveAttachment(source: Readable, directory: string) {
