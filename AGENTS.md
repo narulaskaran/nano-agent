@@ -69,6 +69,7 @@ A pack is a folder that adds one capability. `NANO_PACKS` lists the ones to load
 ```
 <pack>/skills/<skill>/SKILL.md   Agent Skills, advertised to the model and read on demand
 <pack>/extension.ts              optional: tools and hooks (default export `(ctx) => ExtensionFactory`)
+<pack>/capture.ts                optional: tools the background KB filer gets for this pack's items (default export `(ctx) => { <source>: { tools(payload) } }`)
 <pack>/bin/                      optional: commands put on PATH for the agent's shell
 <pack>/install.sh                optional: system dependencies, run when the image is built
 <pack>/start-root.sh             optional: run as root at container start, before privileges drop (a pack under `data/packs/` cannot use this)

@@ -20,6 +20,11 @@ if [ "$(id -u)" = "0" ]; then
       chown -R --from=0 "$uid:$gid" "$dir" || echo "nano: could not take back root-owned files in $dir" >&2
     fi
   done
+  # The core queue database and its WAL files: a root-owned -wal or -shm (a CLI run through `docker exec` without -u)
+  # would make it read-only for Nano.
+  for f in "$data"/nano.sqlite "$data"/nano.sqlite-wal "$data"/nano.sqlite-shm; do
+    if [ -e "$f" ] && [ ! -L "$f" ]; then chown --from=0 "$uid:$gid" "$f" || true; fi
+  done
   # A fresh install gets a starter knowledge base; an existing one is never touched.
   kb="${NANO_KB_DIR:-$data/kb}"
   if [ -d "$kb" ] && [ -z "$(ls -A "$kb")" ]; then

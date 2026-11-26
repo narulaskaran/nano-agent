@@ -22,7 +22,7 @@ async function processReply(db: DatabaseSync, job: ReplyJob, ctx: PackServiceCon
 		}
 		db.prepare("UPDATE side_replies SET outgoing = NULL, body = '', notice = ? WHERE id = ?").run(notice, id);
 		try {
-			await ctx.notifyOwner(notice);
+			await ctx.notifyOwner(notice, { dedupe: `apple-messages:notice:${id}` });
 			remove();
 		} catch {
 			if (ctx.signal.aborted) return;

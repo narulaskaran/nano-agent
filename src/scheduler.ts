@@ -82,7 +82,11 @@ export interface BackgroundWork {
 }
 
 export interface JobSink {
-	send(spaceId: string, text: string): Promise<void>;
+	/**
+	 * Send `text` to `spaceId`. With the outbound queue this resolves once the text is queued durably; `dedupe` names the
+	 * logical send, so a job that fires again after a crash (a reminder not yet removed) does not message twice.
+	 */
+	send(spaceId: string, text: string, dedupe?: string): Promise<void>;
 	task(spaceId: string, prompt: string): Promise<void>;
 	/** Start a background worker; its answer comes back through the task hand-back. */
 	background(spaceId: string, work: BackgroundWork): Promise<void>;
@@ -302,7 +306,7 @@ export class Scheduler {
 			console.error(`nano: outbox ${item.kind === "task" ? "task" : "message"} from ${name}`);
 			try {
 				if (item.kind === "task") await this.sink.task(to, text);
-				else await this.sink.send(to, text);
+				else await this.sink.send(to, text, durable ? `outbox:${path}` : undefined);
 				if (durable) renameSync(path, donePath);
 			} catch (error) {
 				console.error(`nano: outbox delivery failed for ${name}:`, (error as Error)?.message ?? error);
@@ -360,11 +364,12 @@ export class Scheduler {
 	/**
 	 * Send a one-shot reminder, then remove it. A failed send leaves it scheduled and the next tick tries
 	 * again. After RETRY_MS of failures it is dropped, and one last attempt tells the owner what was missed.
-	 * Delivery is at least once: a crash between the send and the removal sends it again on restart.
+	 * With the outbound queue a send only fails when it cannot be queued, and its dedupe key keeps a crash between
+	 * the send and the removal from messaging twice.
 	 */
 	private async deliverReminder(job: Job, now: number): Promise<void> {
 		try {
-			await this.sink.send(job.spaceId, job.body);
+			await this.sink.send(job.spaceId, job.body, `reminder:${job.id}:${job.at}`);
 		} catch (error) {
 			const since = this.failedSince.get(job.id) ?? now;
 			this.failedSince.set(job.id, since);
@@ -506,7 +511,7 @@ export class Scheduler {
 		try {
 			if (job.kind === "message") {
 				if (isReminder(job)) return await this.deliverReminder(job, now);
-				await this.sink.send(job.spaceId, job.body);
+				await this.sink.send(job.spaceId, job.body, `job:${job.id}:${Math.floor(now / 60_000)}`);
 				this.succeeded(job, now);
 			} else if (job.kind === "task") {
 				await agent(`Scheduled task "${job.name}":\n${job.body}\nIf there is nothing worth telling the owner, reply exactly [silent].`);
@@ -531,7 +536,7 @@ export class Scheduler {
 					// A background run's answer is remembered when it ends (taskEnded); a main-conversation turn's is not visible here.
 					if (job.gate && !job.background) this.remember(job, output, now);
 				} else {
-					await this.sink.send(job.spaceId, labelScriptOutput(job.name, output));
+					await this.sink.send(job.spaceId, labelScriptOutput(job.name, output), `job:${job.id}:${Math.floor(now / 60_000)}`);
 					if (job.gate) this.remember(job, output, now);
 				}
 			}

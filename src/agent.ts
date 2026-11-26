@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { appendFileSync, existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import type { AgentSession, ModelRuntime } from "@earendil-works/pi-coding-agent";
@@ -10,7 +11,8 @@ import { getMainModel } from "./models.ts";
 import { refreshProviderSettings } from "./provider-settings.ts";
 import { packExtensions } from "./packs.ts";
 import { buildSystemPrompt } from "./prompt.ts";
-import { LONG_HINT, type RecentTurn, REMEMBER_HINT, route, skillBlock, taskHint } from "./router.ts";
+import { CAPTURE_HINT, LONG_HINT, type RecentTurn, REMEMBER_HINT, route, skillBlock, taskHint } from "./router.ts";
+import { type Capture, HOLD_MS } from "./capture.ts";
 import type { Scheduler } from "./scheduler.ts";
 import { assistantText, createNanoSession } from "./session.ts";
 import { listSkills } from "./skills.ts";
@@ -147,6 +149,8 @@ type Work =
 			skill?: { name: string; path: string };
 			/** The router judged this needs no extended thinking. */
 			simple?: boolean;
+			/** Dedupe key of the background filing item waiting for this turn to end (capture.ts). */
+			capture?: string;
 	  }
 	| { from: "system"; text: string; note: string };
 
@@ -171,9 +175,13 @@ interface RunState {
 /** How many notes made before the session exists are kept for it. */
 const NOTE_KEEP = 5;
 
-interface ConversationOptions {
+export interface ConversationOptions {
 	/** Router decisions, used only when the router is on. Tests inject a fake. */
 	decider?: Decider;
+	/** Queues an owner message for durable delivery (outbound.ts). Without it, `deliver` sends directly. */
+	outbound?: (spaceId: string, text: string, dedupe?: string) => void;
+	/** Background knowledge-base filing (capture.ts). Without it, the turn is told to save lasting facts itself. */
+	capture?: Pick<Capture, "enqueue" | "release" | "status">;
 }
 
 export class Conversation {
@@ -206,6 +214,8 @@ export class Conversation {
 	/** Owner messages are routed one at a time, in arrival order. */
 	private routing: Promise<void> = Promise.resolve();
 	private readonly decider?: Decider;
+	private readonly outbound?: ConversationOptions["outbound"];
+	private readonly capture?: ConversationOptions["capture"];
 	/** Skills already put into this session's prompts by the router. */
 	private injectedSkills = new Set<string>();
 
@@ -221,6 +231,9 @@ export class Conversation {
 	) {
 		this.spaceId = spaceId;
 		this.decider = config.router ? (options.decider ?? createDecider({ dataDir: config.dataDir })) : undefined;
+		this.outbound = options.outbound;
+		// Only the owner's own conversation feeds the owner's knowledge base.
+		this.capture = spaceId === config.owner ? options.capture : undefined;
 		this.config = config;
 		this.channel = channel;
 		this.store = store;
@@ -249,12 +262,22 @@ export class Conversation {
 
 	/**
 	 * Send text to the owner that the agent did not write this turn (plain reminders, script output).
-	 * Unlike a reply, a failed send throws, so the scheduler can retry or report it.
+	 * With the outbound queue (outbound.ts) the text is queued durably and this resolves once it is queued; a repeated
+	 * `dedupe` is ignored. Without it the text is sent now, and a failed send throws.
 	 */
-	async deliver(text: string): Promise<void> {
+	async deliver(text: string, dedupe?: string): Promise<void> {
 		if (isSilent(text)) return;
+		if (this.outbound) {
+			this.outbound(this.spaceId, text, dedupe);
+			return;
+		}
 		await this.channel.send(this.spaceId, text);
-		this.record("nano", text); // only once it was sent, so a retry is not logged twice
+		await this.delivered(text);
+	}
+
+	/** A message sent outside this conversation reached the owner: log it and tell the session. Only once it was sent, so a retry is not logged twice. */
+	async delivered(text: string): Promise<void> {
+		this.record("nano", text);
 		await this.keepNote(
 			"nano-delivered",
 			() => `[Sent to the owner outside this conversation (a scheduled job, reminder or notice), not written by you here: "${clip(text)}"]`,
@@ -338,7 +361,22 @@ export class Conversation {
 		const actions: string[] = [];
 		// Something may have started while the decision was being made; then the message joins it as usual.
 		const free = !this.run && !this.queue.busy;
-		if (free && decision.noReply && !hasFiles) {
+		const noReply = free && decision.noReply && !hasFiles;
+		// A lasting fact is filed in the background: right away when no turn runs, else once the turn has ended
+		// (so the filer sees anything the turn wrote), and at the latest after HOLD_MS.
+		let captured = false;
+		if (decision.remember && this.capture) {
+			const dedupe = `owner:${now}:${createHash("sha256").update(work.spoken).digest("hex").slice(0, 16)}`;
+			const recent = before.recent.slice(-4).map((t) => ({ role: t.role, text: t.text.slice(0, 400) }));
+			try {
+				captured = this.capture.enqueue({ source: "owner", text: work.spoken, at: now, recent }, { dedupe, dueAt: noReply ? now : now + HOLD_MS });
+				if (captured && !noReply) work.capture = dedupe;
+				if (captured) actions.push("capture");
+			} catch (error) {
+				console.error("nano: could not queue background filing:", (error as Error)?.message ?? error);
+			}
+		}
+		if (noReply) {
 			actions.push("no-reply");
 		} else {
 			const quietMinutes = before.lastActivity > 0 ? (now - before.lastActivity) / 60_000 : 0;
@@ -356,7 +394,8 @@ export class Conversation {
 				hints.push(taskHint(task));
 				actions.push(`task:${task.id}`);
 			}
-			if (decision.remember) {
+			if (captured) hints.push(CAPTURE_HINT);
+			else if (decision.remember) {
 				hints.push(REMEMBER_HINT);
 				actions.push("remember-hint");
 			}
@@ -438,7 +477,8 @@ export class Conversation {
 			if (run.from === "owner" && this.config.inbound === "interrupt") batch = [...batch, ...this.queue.takeNext("owner")];
 			run.phase = "starting";
 			const images = batch.flatMap((w) => (w.from === "owner" ? w.images : []));
-			const body = batch.map((w) => (w.from === "owner" ? this.stamp(w.spoken) + this.routerNotes(w) : this.stamp(w.text, w.note))).join("\n\n");
+			const filing = run.from === "owner" ? this.capture?.status() : undefined;
+			const body = batch.map((w) => (w.from === "owner" ? this.stamp(w.spoken) + this.routerNotes(w) : this.stamp(w.text, w.note))).join("\n\n") + (filing ? `\n[${filing}]` : "");
 			// Thinking is turned off only when every message in the turn was judged simple, and back on right after.
 			const owners = batch.filter((w) => w.from === "owner");
 			const thinking = session.thinkingLevel;
@@ -453,6 +493,7 @@ export class Conversation {
 			await this.fail(error);
 		} finally {
 			this.run = undefined;
+			for (const w of batch) if (w.from === "owner" && w.capture) this.capture?.release(w.capture);
 			clearInterval(typing);
 			void this.channel.typing(this.spaceId, false);
 			this.state.sessionFile = this.session?.sessionFile ?? this.state.sessionFile;

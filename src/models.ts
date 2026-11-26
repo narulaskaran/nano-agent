@@ -40,6 +40,11 @@ export function getMainModel(config: Config, runtime: ModelRuntime): Model<Api> 
 	return model && capOutput(withProviderOrder(config, model));
 }
 
+/** The owner's background model when one is set (provider-settings.ts), for background work; otherwise undefined. */
+export function getBackgroundModel(config: Config, runtime: ModelRuntime): Model<Api> | undefined {
+	return config.background ? runtime.getModel(config.background.provider, config.background.modelId) : undefined;
+}
+
 /** One plain completion: a system prompt and user turns, with no tools or session. */
 export async function completeText(
 	runtime: ModelRuntime,

@@ -8,7 +8,7 @@ WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci --omit=dev --ignore-scripts && npm cache clean --force
 COPY patches ./patches
-RUN node patches/spectrum-imessage-revisions.mjs
+RUN node patches/spectrum-imessage-revisions.mjs && node patches/spectrum-imessage-send-ids.mjs
 COPY src ./src
 COPY prompts ./prompts
 COPY packs ./packs

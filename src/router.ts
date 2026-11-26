@@ -69,6 +69,9 @@ export const LONG_HINT =
 export const REMEMBER_HINT =
 	"Router: this message seems to state something lasting about the owner (a preference, fact, plan or decision). If it does, save it to the right knowledge base note as well as replying.";
 
+export const CAPTURE_HINT =
+	"Router: this message seems to state something lasting about the owner. A background filer will save it to the knowledge base after this turn, so do not write it there yourself; just reply.";
+
 export function taskHint(task: { id: string; title: string }): string {
 	return `Router: this seems to be about background task ${task.id} "${task.title}", which is still running. Check it with task_check; if the owner is changing it, cancel it with task_cancel and delegate the corrected version.`;
 }

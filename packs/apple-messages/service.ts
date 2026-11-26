@@ -183,7 +183,7 @@ async function notifyLegacy(db: DatabaseSync, ctx: PackServiceContext, denied: (
 					db.prepare("UPDATE pending SET notify = ? WHERE id = ?").run(notify, id);
 				}
 				if (notify && !ctx.signal.aborted && !denied(String(row.chat))) {
-					await ctx.notifyOwner(`A message asked for Nano. Ask me to read it from Messages (message ${id}).`);
+					await ctx.notifyOwner(`A message asked for Nano. Ask me to read it from Messages (message ${id}).`, { dedupe: `apple-messages:mention:${id}` });
 				}
 			}
 			remove.run(id);

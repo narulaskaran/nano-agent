@@ -1,7 +1,9 @@
 import { join } from "node:path";
 import { readIfExists } from "../../../src/config.ts";
 import { confident, createDecider, type Decider, DecisionError, type DecisionRequest, top } from "../../../src/decide.ts";
+import { CAPTURE_TABLE } from "../../../src/capture.ts";
 import { writePrivateFile } from "../../../src/json-store.ts";
+import { enqueueJob, openQueueDb } from "../../../src/queue.ts";
 import { emailOf, header, type Message, messageDate } from "./gmail.ts";
 import { type Ctx, GMAIL } from "./http.ts";
 import { CliError, dataDir, decodeEntities, fmtDateTime, intOpt, mapLimit, oneLine, parse, readJson, untrusted } from "./util.ts";
@@ -66,6 +68,8 @@ export interface WatchState {
 interface Matter {
 	id: string;
 	description: string;
+	/** The note, relative to the knowledge base. */
+	path: string;
 }
 
 interface Item {
@@ -105,7 +109,7 @@ export function kbMatters(kbDir: string, folders: string[] = MATTER_FOLDERS): Ma
 			if (seen.has(id)) continue;
 			seen.add(id);
 			const useful = summary && !/summary missing/i.test(summary) ? `: ${summary.trim()}` : "";
-			matters.push({ id, description: oneLine(`${title}${useful}`, 240) });
+			matters.push({ id, description: oneLine(`${title}${useful}`, 240), path: `${name}/${file}.md` });
 		}
 	}
 	return matters.slice(0, MAX_MATTERS);
@@ -246,6 +250,7 @@ export async function watch(ctx: Ctx, argv: string[], decider?: Decider): Promis
 	}
 
 	let decided: DecidedItem[] = [];
+	const matterPaths = new Map<string, string>();
 	if (byThread.size > 0) {
 		const entries = [...byThread.values()];
 		const threadOwner = new Map<string, boolean>();
@@ -282,6 +287,7 @@ export async function watch(ctx: Ctx, argv: string[], decider?: Decider): Promis
 		});
 
 		const matters = kbMatters(kbDir, values.matters ? values.matters.split(",").map((f) => f.trim()).filter(Boolean) : MATTER_FOLDERS);
+		for (const m of matters) matterPaths.set(m.id, m.path);
 		const rules = (readIfExists(rulesPath) ?? "").trim().slice(0, RULES_CHARS);
 		const useDecider = decider ?? createDecider({ dataDir: dataDir(env) });
 
@@ -300,9 +306,35 @@ export async function watch(ctx: Ctx, argv: string[], decider?: Decider): Promis
 		});
 	}
 
-	const kept = decided.filter((i) => !(i.handle === "ignore" && i.p >= IGNORE_MIN));
-	for (const id of fresh) state.seen[id] = now;
+	let kept = decided.filter((i) => !(i.handle === "ignore" && i.p >= IGNORE_MIN));
+	// Mail confidently judged worth filing goes straight to Nano's background filer (src/capture.ts); the agent never runs for it.
+	// It is queued before the state is saved, so a crash cannot lose it, and its dedupe key makes a re-run harmless.
+	// When it cannot be queued it falls back to the agent, as before.
+	const filed = new Set<DecidedItem>();
+	const toFile = kept.filter((i) => i.handle === "remember" && i.p >= SURE_MIN && !i.error);
+	if (toFile.length > 0 && env.NANO_CAPTURE !== "off") {
+		try {
+			const db = openQueueDb(dataDir(env));
+			try {
+				for (const i of toFile) {
+					enqueueJob(db, CAPTURE_TABLE, {
+						key: `gmail:${i.m.id}`,
+						dedupe: `gmail:${i.m.id}`,
+						payload: { source: "gmail", messageId: i.m.id, from: i.from, subject: i.subject, date: i.date, snippet: oneLine(i.snippet, 300), matter: i.matter ? matterPaths.get(i.matter) : undefined },
+					}, now);
+					filed.add(i);
+				}
+			} finally {
+				db.close();
+			}
+		} catch (error) {
+			ctx.io.err(`gmail watch: could not queue filing (${oneLine((error as Error)?.message ?? String(error), 120)}); handing it to the agent`);
+		}
+	}
+	if (filed.size) ctx.io.err(`gmail watch: ${filed.size} email${filed.size === 1 ? "" : "s"} queued for background filing`);
 	for (const i of kept) state.threads[i.m.threadId] = { handle: i.handle ?? "undecided", at: now };
+	kept = kept.filter((i) => !filed.has(i));
+	for (const id of fresh) state.seen[id] = now;
 	state.lastRun = now;
 	prune(state, now);
 	writePrivateFile(statePath, JSON.stringify(state));
