@@ -4,6 +4,7 @@ import type { DecisionRequest } from "../../src/decide.ts";
 import type { PackServiceContext } from "../../src/packs.ts";
 import { loadHistory, type Message } from "./client.ts";
 import { isNanoPost, privatePattern, speakerLabel } from "./content.ts";
+import { REMINDER_HINT, reminderReply } from "./remind.ts";
 import type { MemoryNote } from "./state.ts";
 import { webTools } from "./web.ts";
 
@@ -184,6 +185,17 @@ export async function draftReply(
 	job: ReplyJob, notes: MemoryNote[], ctx: PackServiceContext, signal: AbortSignal, active: () => boolean,
 ): Promise<DraftOutcome | undefined> {
 	const { context, from } = chatContext(await loadHistory(job.chat, HISTORY_FETCH, signal), job.id, CONTEXT_MESSAGES, CONTEXT_CHARS, job.chat);
+	// Only the owner can set a reminder: it lands in their private conversation. Everyone else gets an ordinary draft.
+	if (job.owner && REMINDER_HINT.test(job.body)) {
+		try {
+			const text = await reminderReply(job, context, ctx, signal, active);
+			if (!active()) return;
+			if (text) return { text, kind: "answer" };
+		} catch {
+			console.warn(`nano: Apple Messages reminder not set for message ${job.id}`);
+			return { text: UNAVAILABLE, kind: "unavailable" };
+		}
+	}
 	const memory = notes.map((note) => `${speakerLabel(job.chat, note.actor, Boolean(note.owner))}: ${note.fact}`).join("\n").slice(0, 3000);
 	const seen = [context, memory];
 	const tools = process.env.NANO_APPLE_MESSAGES_WEB === "off" ? [] : publicTools(ctx.config.braveApiKey, () => [job.body, ...seen]);

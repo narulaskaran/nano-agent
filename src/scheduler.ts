@@ -27,6 +27,8 @@ export interface Job {
 	then?: "send" | "task";
 	/** One-shot: epoch milliseconds. */
 	at?: number;
+	/** Names the request behind a job. Adding the same key again while it is scheduled returns the existing job. */
+	key?: string;
 	/** Recurring: five-field cron expression in the owner's timezone. */
 	cron?: string;
 	/** Recurring jobs stop after this moment (epoch milliseconds). */
@@ -236,6 +238,8 @@ export class Scheduler {
 	}
 
 	add(input: Omit<Job, "id" | "createdAt">): Job {
+		const existing = input.key ? this.jobs.find((job) => job.key === input.key) : undefined;
+		if (existing) return existing;
 		if (!input.at && !input.cron) throw new Error("a job needs a time (at) or a schedule (cron)");
 		if (input.cron) cronMatches(input.cron, new Date(), currentTimezone(this.config)); // validates
 		if (input.gate) {

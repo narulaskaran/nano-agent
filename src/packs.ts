@@ -53,11 +53,21 @@ export interface PackServiceContext {
 	 */
 	notifyOwner: (text: string, options?: { dedupe?: string }) => Promise<void>;
 	/**
+	 * Schedule a one-time reminder to the owner (scheduler.ts): `text` is sent to them word for word at `at`, and they can
+	 * list and cancel it like any other job. A `key` that is already scheduled adds nothing and returns that job's time.
+	 */
+	remindOwner: (reminder: { key: string; name: string; text: string; at: number }) => { at: number };
+	/**
 	 * One completion on the main model (or the background model, with `options.role`) with the given system prompt: no
 	 * owner profile or memory, no conversation, and no tools except the ones the caller lends in `options.tools` (see
 	 * compose.ts). For text written to third parties, which must not carry the owner's context.
 	 */
 	compose: (system: string, user: string, signal: AbortSignal, options?: ComposeOptions) => Promise<string>;
+}
+
+/** `PackServiceContext.remindOwner`: a plain one-time message job addressed to the owner, and nothing else. */
+export function ownerReminders(scheduler: Pick<Scheduler, "add">, owner: string): PackServiceContext["remindOwner"] {
+	return ({ key, name, text, at }) => ({ at: scheduler.add({ key, name, kind: "message", body: text, at, spaceId: owner }).at! });
 }
 
 export async function startPackServices(ctx: PackServiceContext): Promise<void> {

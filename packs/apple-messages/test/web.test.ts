@@ -191,6 +191,7 @@ createInterface({ input: process.stdin }).once("line", (line) => {
 		},
 		compose,
 		notifyOwner: async (message) => void notices.push(message),
+		remindOwner: () => assert.fail("no reminder in this test"),
 	});
 	const sent = async () => {
 		const deadline = Date.now() + 8000;

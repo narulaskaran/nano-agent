@@ -43,6 +43,7 @@ function startService(dir: string, signal: AbortSignal, ctx: Pick<PackServiceCon
 		compose: async () => {
 			throw new Error("drafting is off in this test");
 		},
+		remindOwner: () => assert.fail("no reminder in this test"),
 		...ctx,
 	});
 }
@@ -360,6 +361,7 @@ createInterface({ input: process.stdin }).once("line", (line) => {
 			return "All good here.";
 		},
 		notifyOwner: async () => {},
+		remindOwner: () => assert.fail("no reminder in this test"),
 	});
 	try {
 		const deadline = Date.now() + 8000;

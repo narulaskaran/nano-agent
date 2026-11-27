@@ -34,6 +34,11 @@ Use the same trigger for follow-ups, such as `What about Friday, Nano?`. Include
 2. Give a draft with a fixable violation one rewrite and check it again. If the final outcome is a policy decline, post a short decline in the source chat and privately tell the owner why, regardless of who invoked Nano. Log the reason category without message bodies. Alert the owner privately when sync or delivery is stuck.
 3. Track delivery per chat with bounded retries. If a send's outcome is unknown, check Messages history before retrying.
 
+## Reminders
+
+- A reminder the owner asks for in a side chat is scheduled for the owner alone and delivered in their private conversation. Side chats get no scheduled posts.
+- Only the owner's messages can create one. The model reads the request into a time and a short task with no tools; the runtime validates it, schedules a plain message job, and posts a fixed confirmation.
+
 ## Reply controls
 
 - The owner can say `Nano, stop responding in this chat` to remove the chat from the allowlist. Handle the stop command before the general mention rule. Removal stops automatic replies and memory capture and cancels replies that have yet to send. A later eligible mention from the owner can enable the chat again.
