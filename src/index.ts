@@ -8,7 +8,7 @@ import { currentTimezone, loadConfig, localDate, startTimezoneSync } from "./con
 import { completeText, createModelRuntime, getBackgroundModel, getMainModel, localProviderId } from "./models.ts";
 import { createOutbound } from "./outbound.ts";
 import { refreshProviderSettings } from "./provider-settings.ts";
-import { extendPath, packCaptureSources, skillPaths, startPackServices } from "./packs.ts";
+import { extendPath, ownerReminders, packCaptureSources, skillPaths, startPackServices } from "./packs.ts";
 import { profileExists } from "./prompt.ts";
 import { providerFetch } from "./provider-client.ts";
 import { openQueueDb } from "./queue.ts";
@@ -146,6 +146,7 @@ async function main(): Promise<void> {
 		decider,
 		signal: packServices.signal,
 		notifyOwner: (text, options) => conversation(config.owner).deliver(text, options?.dedupe),
+		remindOwner: ownerReminders(scheduler, config.owner),
 		compose,
 	});
 	console.error(`nano: listening on ${config.channel}, ${scheduler.list().length} scheduled job(s), up to ${config.maxTasks} background task(s)`);

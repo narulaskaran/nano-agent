@@ -57,6 +57,7 @@ test("memory capture is scoped to its chat while the owner can look up across ch
 		config: loadConfig({ NANO_CHANNEL: "stdin", NANO_DATA_DIR: dir, NANO_OWNER: "owner" }),
 		signal: new AbortController().signal,
 		notifyOwner: async () => assert.fail("memory capture must remain quiet"),
+		remindOwner: () => assert.fail("memory capture sets no reminders"),
 		decider: {
 			allow() {},
 			async decide(request) {
